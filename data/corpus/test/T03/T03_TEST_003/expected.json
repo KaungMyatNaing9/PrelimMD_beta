@@ -1,0 +1,51 @@
+{
+  "sample_id": "T03_TEST_003",
+  "template_id": "T03",
+  "fields": [
+    {
+      "field_id": "patient.full_name",
+      "normalized_value": "Jordan Lee",
+      "content_type": "printed"
+    },
+    {
+      "field_id": "patient.dob",
+      "normalized_value": "1988-12-14",
+      "content_type": "printed"
+    },
+    {
+      "field_id": "patient.phone",
+      "normalized_value": "312-555-0134",
+      "content_type": "printed"
+    },
+    {
+      "field_id": "patient.member_id",
+      "normalized_value": "AB100034",
+      "content_type": "printed"
+    },
+    {
+      "field_id": "patient.age",
+      "normalized_value": "58",
+      "content_type": "printed"
+    },
+    {
+      "field_id": "consent.accepted",
+      "normalized_value": true,
+      "content_type": "printed"
+    },
+    {
+      "field_id": "medications.current",
+      "normalized_value": "Lisinopril 10 mg",
+      "content_type": "handwritten"
+    },
+    {
+      "field_id": "notes.visit",
+      "normalized_value": "Synthetic sample only.\nNo real patient data.",
+      "content_type": "handwritten"
+    },
+    {
+      "field_id": "signature.present",
+      "normalized_value": true,
+      "content_type": "printed"
+    }
+  ]
+}
