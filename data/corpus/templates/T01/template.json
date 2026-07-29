@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0",
+  "template_id": "T01",
+  "template_name": "Synthetic Intake T01",
+  "version": 1,
+  "page_count": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "canonical_width": 1275,
+      "canonical_height": 1650,
+      "fields": [
+        {
+          "field_id": "patient.full_name",
+          "label": "Patient name",
+          "field_type": "short_text",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.17,
+            "width": 0.58,
+            "height": 0.035
+          },
+          "required": true,
+          "normalizer": "short_text",
+          "review_threshold": 0.75,
+          "pattern": null
+        },
+        {
+          "field_id": "patient.dob",
+          "label": "Date of birth",
+          "field_type": "date",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.25,
+            "width": 0.25,
+            "height": 0.035
+          },
+          "required": true,
+          "normalizer": "date",
+          "review_threshold": 0.8,
+          "pattern": null
+        },
+        {
+          "field_id": "patient.phone",
+          "label": "Phone",
+          "field_type": "phone",
+          "bbox": {
+            "x": 0.55,
+            "y": 0.25,
+            "width": 0.28,
+            "height": 0.035
+          },
+          "required": true,
+          "normalizer": "phone",
+          "review_threshold": 0.75,
+          "pattern": null
+        },
+        {
+          "field_id": "patient.member_id",
+          "label": "Insurance ID",
+          "field_type": "insurance_id",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.33,
+            "width": 0.4,
+            "height": 0.035
+          },
+          "required": true,
+          "normalizer": "insurance_id",
+          "review_threshold": 0.8,
+          "pattern": "[A-Z]{2}\\d{6}"
+        },
+        {
+          "field_id": "patient.age",
+          "label": "Age",
+          "field_type": "number",
+          "bbox": {
+            "x": 0.65,
+            "y": 0.33,
+            "width": 0.18,
+            "height": 0.035
+          },
+          "required": false,
+          "normalizer": "number",
+          "review_threshold": 0.75,
+          "pattern": null
+        },
+        {
+          "field_id": "consent.accepted",
+          "label": "Consent accepted",
+          "field_type": "checkbox",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.47,
+            "width": 0.035,
+            "height": 0.03
+          },
+          "required": true,
+          "normalizer": "checkbox",
+          "review_threshold": 0.75,
+          "pattern": null
+        },
+        {
+          "field_id": "medications.current",
+          "label": "Current medications",
+          "field_type": "medication_list",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.56,
+            "width": 0.7,
+            "height": 0.1
+          },
+          "required": false,
+          "normalizer": "medication_list",
+          "review_threshold": 0.75,
+          "pattern": null
+        },
+        {
+          "field_id": "notes.visit",
+          "label": "Visit notes",
+          "field_type": "multiline_text",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.73,
+            "width": 0.7,
+            "height": 0.1
+          },
+          "required": false,
+          "normalizer": "multiline_text",
+          "review_threshold": 0.75,
+          "pattern": null
+        },
+        {
+          "field_id": "signature.present",
+          "label": "Signature present",
+          "field_type": "signature_presence",
+          "bbox": {
+            "x": 0.15,
+            "y": 0.89,
+            "width": 0.5,
+            "height": 0.045
+          },
+          "required": true,
+          "normalizer": "signature_presence",
+          "review_threshold": 0.75,
+          "pattern": null
+        }
+      ]
+    }
+  ]
+}
