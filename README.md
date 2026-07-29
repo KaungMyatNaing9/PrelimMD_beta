@@ -19,7 +19,7 @@ Current limitation: generic scan/image OCR and general-purpose unknown-layout de
 
 ## Run locally
 
-Requirements: Python 3.12, Node.js 20+, and optionally Docker Desktop for PostgreSQL. Do not use the old Python 3.14 `.venv`.
+Requirements: Python 3.12, Node.js 20+, and optionally Docker Desktop for PostgreSQL. 
 
 ```bash
 cd /Users/kaungmyatnaing/GitRepo/PrelimMD_beta
