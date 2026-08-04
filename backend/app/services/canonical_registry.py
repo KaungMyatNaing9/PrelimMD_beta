@@ -63,7 +63,7 @@ FIELDS = [
         "Consent to treatment",
         "consent",
         FieldType.CHECKBOX,
-        ["Consent to Treatment"],
+        ["Consent to Treatment", "Consent Accepted", "Consent"],
         False,
         "never_inherit",
         "confirm",
@@ -73,12 +73,38 @@ FIELDS = [
         "Signature present",
         "consent",
         FieldType.SIGNATURE_PRESENCE,
-        ["Patient Signature", "Signature"],
+        ["Patient Signature", "Signature", "Signature Present"],
         False,
         "never_inherit",
         "confirm",
     ),
+    ("patient.age", "Age", "demographics", FieldType.NUMBER, ["Age"]),
+    (
+        "notes.visit",
+        "Visit notes",
+        "clinical",
+        FieldType.MULTILINE_TEXT,
+        ["Visit Notes", "Notes", "Visit Note"],
+        False,
+        "refresh",
+        "optional",
+    ),
 ]
+
+# The labelled corpus was authored against its own field vocabulary. Extraction always
+# emits canonical keys; this table exists so evaluation can line the two up without
+# rewriting every expected.json.
+CORPUS_KEY_ALIASES = {
+    "patient.full_name": "patient.full_name",
+    "patient.dob": "patient.date_of_birth",
+    "patient.phone": "patient.phone",
+    "patient.age": "patient.age",
+    "patient.member_id": "insurance.member_id",
+    "medications.current": "medical.current_medications",
+    "notes.visit": "notes.visit",
+    "consent.accepted": "consent.treatment",
+    "signature.present": "consent.signature_present",
+}
 REGISTRY = {
     key: CanonicalFieldDefinition(
         canonical_key=key,

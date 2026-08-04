@@ -12,8 +12,30 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "data" / "corpus"
 W, H = 1275, 1650
-FONT = ImageFont.load_default()
-BIG = ImageFont.load_default()
+
+
+def _font(size: int):
+    """A real TrueType face at a legible size.
+
+    Pillow's bitmap default renders far too small for OCR: on noise-free pages it still
+    misread digits (500 -> 600) and dropped characters, which made the corpus unusable
+    as ground truth. Falls back through common system paths, then to the old default.
+    """
+    for path in (
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "DejaVuSans.ttf",
+    ):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+FONT = _font(26)
+BIG = _font(32)
 FIELDS = [
     ("patient.full_name", "Patient name", "short_text", 0.15, 0.17, 0.58, 0.035, True),
     ("patient.dob", "Date of birth", "date", 0.15, 0.25, 0.25, 0.035, True),
@@ -100,7 +122,8 @@ def draw_form(defn, values=None):
             int(b["width"] * W),
             int(b["height"] * H),
         )
-        d.text((x, y - 18), f["label"], fill="#222", font=FONT)
+        # Clear of the box top so the larger face does not collide with the rule line.
+        d.text((x, y - 34), f["label"], fill="#222", font=FONT)
         d.rectangle((x, y, x + w, y + h), outline="#444", width=1)
         val = (values or {}).get(f["field_id"], "")
         if f["field_type"] == "checkbox":
