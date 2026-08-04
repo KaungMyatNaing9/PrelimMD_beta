@@ -17,6 +17,7 @@ from app.services.field_layout import (
     label_for_box,
     partition,
 )
+from app.services.templates import registry
 from app.services.word_source import (
     Word,
     group_lines_exact,
@@ -236,7 +237,7 @@ class FormAnalyzer:
         pdf = folder / "source.pdf"
         if pdf.exists():
             return self._analyze_pdf(analysis_id, folder, pdf, started)
-        return self._analyze_image(analysis_id, folder, started)
+        return self._analyze_image(analysis_id, folder, started, template_hint)
 
     def _analyze_pdf(
         self, analysis_id: str, folder: Path, pdf: Path, started: float
@@ -266,7 +267,13 @@ class FormAnalyzer:
             processing_time_ms=int((time.monotonic() - started) * 1000),
         )
 
-    def _analyze_image(self, analysis_id: str, folder: Path, started: float) -> FormAnalysis:
+    def _analyze_image(
+        self,
+        analysis_id: str,
+        folder: Path,
+        started: float,
+        template_hint: str | None = None,
+    ) -> FormAnalysis:
         """OCR a photo or scan. Coordinates come from the contrast-enhanced grayscale
         page, which shares dimensions with the colour page served to the review UI."""
         from PIL import Image
@@ -292,6 +299,17 @@ class FormAnalyzer:
 
         words = words_from_image(page_image, settings.ocr_language)
         w, h = Image.open(page_image).size
+
+        # Identify the blank master this page came from, so its values can later be
+        # regenerated onto the template's own exact field coordinates.
+        matched, match_score = None, 0.0
+        colour = cv2.imread(str(folder / "normalized_color.png"))
+        if colour is not None:
+            try:
+                definition, match_score = registry.match(colour, template_hint)
+                matched = definition.template_id if definition and match_score >= 0.12 else None
+            except RuntimeError:
+                matched = None
 
         # A form is either boxed (label above or left of a drawn box) or inline
         # ("label: value" on one row). Running both and merging makes the two compete
@@ -324,6 +342,7 @@ class FormAnalyzer:
                     "mean_ocr_confidence": round(_mean_confidence(words), 3),
                     "layout": layout,
                     "boxes_detected": len(boxes),
+                    "template_match_confidence": round(match_score, 3),
                     "width": w,
                     "height": h,
                 }
@@ -331,6 +350,7 @@ class FormAnalyzer:
             detected_fields=fields,
             # Hashes the normalized page: raw photo bytes vary with capture noise.
             form_fingerprint=hashlib.sha256(page_image.read_bytes()).hexdigest(),
+            matched_known_template=matched,
             warnings=warnings,
             processing_time_ms=int((time.monotonic() - started) * 1000),
         )

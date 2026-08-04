@@ -10,6 +10,7 @@ from app.schemas.models import ExtractionSource
 from app.services.capture import new_run_dir, preprocess, save_upload
 from app.services.extraction import extract_run, read_run, write_run
 from app.services.form_analyzer import FormAnalyzer
+from app.services.regeneration import regenerate, values_from_analysis
 from app.services.templates import registry
 
 app = FastAPI(title="PrelimMD", version="0.1.0")
@@ -113,6 +114,42 @@ def correct_analysis_field(analysis_id: str, field_id: str, correction: Correcti
             (folder / "analysis.json").write_text(analysis.model_dump_json(indent=2))
             return field
     raise HTTPException(404, "Field not found")
+
+
+@app.get("/api/v1/form-analyses/{analysis_id}/regenerate")
+def regenerate_form(analysis_id: str, template_id: str | None = None):
+    """Fill this analysis's stored values onto its blank template, as a PDF."""
+    analysis = get_form_analysis(analysis_id)
+    chosen = template_id or analysis.matched_known_template
+    if not chosen:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "NO_TEMPLATE_FOR_REGENERATION",
+                "message": (
+                    "No known template matched this upload, so there is no blank master "
+                    "to fill. Pass ?template_id= to choose one explicitly."
+                ),
+            },
+        )
+    try:
+        template = registry.get(chosen)
+    except KeyError as exc:
+        raise HTTPException(404, f"Unknown template {chosen}") from exc
+
+    try:
+        pdf = regenerate(template, values_from_analysis(analysis))
+    except FileNotFoundError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{analysis_id}_{chosen}.pdf"',
+            "X-Template-Id": chosen,
+        },
+    )
 
 
 @app.post("/api/v1/captures", status_code=202)
