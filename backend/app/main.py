@@ -11,7 +11,8 @@ from app.services.capture import new_run_dir, preprocess, save_upload
 from app.services.extraction import extract_run, read_run, write_run
 from app.services.form_analyzer import FormAnalyzer
 from app.services.regeneration import regenerate, values_from_analysis
-from app.services.templates import registry
+from app.services.template_builder import derive_template
+from app.services.templates import MATCH_THRESHOLD, registry
 
 app = FastAPI(title="PrelimMD", version="0.1.0")
 app.add_middleware(
@@ -116,6 +117,31 @@ def correct_analysis_field(analysis_id: str, field_id: str, correction: Correcti
     raise HTTPException(404, "Field not found")
 
 
+@app.post("/api/v1/form-analyses/{analysis_id}/derive-template", status_code=201)
+def derive_template_from_analysis(analysis_id: str, template_name: str | None = None):
+    """Learn a reusable blank template from a form no registered template matched."""
+    folder = run_dir(analysis_id)
+    analysis = get_form_analysis(analysis_id)
+    page_image = folder / "normalized_color.png"
+    if not page_image.exists():
+        raise HTTPException(422, "No normalized page image for this analysis")
+    try:
+        definition = derive_template(analysis, page_image, template_name)
+    except ValueError as exc:
+        raise HTTPException(
+            422, detail={"code": "TEMPLATE_NOT_DERIVABLE", "message": str(exc)}
+        ) from exc
+
+    analysis.matched_known_template = definition.template_id
+    (folder / "analysis.json").write_text(analysis.model_dump_json(indent=2))
+    return {
+        "template_id": definition.template_id,
+        "template_name": definition.template_name,
+        "field_count": len(definition.pages[0].fields),
+        "fields": [f.field_id for f in definition.pages[0].fields],
+    }
+
+
 @app.get("/api/v1/form-analyses/{analysis_id}/regenerate")
 def regenerate_form(analysis_id: str, template_id: str | None = None):
     """Fill this analysis's stored values onto its blank template, as a PDF."""
@@ -168,7 +194,7 @@ async def create_capture(
         raise HTTPException(503, "OpenCV template matching dependency is unavailable") from exc
     image = cv2.imread(str(folder / "normalized_color.png"))
     template, score = registry.match(image, template_id)
-    if template is None or score < 0.12:
+    if template is None or score < MATCH_THRESHOLD:
         raise HTTPException(
             422,
             detail={

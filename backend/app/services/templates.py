@@ -9,7 +9,41 @@ import numpy as np
 from app.schemas.models import TemplateDefinition
 
 ROOT = Path(__file__).resolve().parents[3]
+# Corpus masters are frozen evaluation ground truth; templates derived at runtime are kept
+# separate so deriving one can never mutate the benchmark.
 TEMPLATE_ROOT = ROOT / "data" / "corpus" / "templates"
+DERIVED_ROOT = ROOT / "data" / "templates"
+TEMPLATE_ROOTS = (TEMPLATE_ROOT, DERIVED_ROOT)
+
+# Below this many geometrically-consistent matches, a "match" is noise.
+MIN_GEOMETRIC_MATCHES = 8
+GEOMETRIC_MATCH_POOL = 300
+# Measured separation is wide: an unrelated form scores ~0.04, the right template ~1.0.
+MATCH_THRESHOLD = 0.5
+
+
+def _geometric_score(matches, query_keys, master_keys) -> float:
+    """Fraction of descriptor matches that agree on a single geometric transform.
+
+    Raw match counts do not discriminate between intake forms: they all share boxes,
+    rules and similar type, so unrelated pages score nearly as high as the right one.
+    Requiring the matches to be consistent with one homography is what separates a real
+    template hit from generic form-shaped resemblance.
+    """
+    if cv2 is None or len(matches) < MIN_GEOMETRIC_MATCHES:
+        return 0.0
+    # Keep a wide pool: capping too tightly saturates every candidate at 1.0 and the
+    # ranking between similar templates collapses into an arbitrary tie.
+    ranked = sorted(matches, key=lambda m: m.distance)[:GEOMETRIC_MATCH_POOL]
+    source = np.float32([query_keys[m.queryIdx].pt for m in ranked])
+    target = np.float32([master_keys[m.trainIdx].pt for m in ranked])
+    _, mask = cv2.findHomography(source, target, cv2.RANSAC, 5.0)
+    if mask is None:
+        return 0.0
+    inliers = int(mask.sum())
+    if inliers < MIN_GEOMETRIC_MATCHES:
+        return 0.0
+    return inliers / len(ranked)
 
 
 class TemplateRegistry:
@@ -18,9 +52,10 @@ class TemplateRegistry:
 
     def load(self) -> None:
         self._templates = {}
-        for path in TEMPLATE_ROOT.glob("T*/template.json"):
-            definition = TemplateDefinition.model_validate_json(path.read_text())
-            self._templates[definition.template_id] = definition
+        for root in TEMPLATE_ROOTS:
+            for path in root.glob("T*/template.json"):
+                definition = TemplateDefinition.model_validate_json(path.read_text())
+                self._templates[definition.template_id] = definition
 
     def get(self, template_id: str) -> TemplateDefinition:
         if not self._templates:
@@ -53,14 +88,13 @@ class TemplateRegistry:
         matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         best: tuple[TemplateDefinition | None, float] = (None, 0.0)
         for definition in self.all():
-            master = cv2.imread(str(TEMPLATE_ROOT / definition.template_id / "blank_preview.png"))
+            master = cv2.imread(str(canonical_image_path(definition.template_id)))
             if master is None:
                 continue
             mk, md = orb.detectAndCompute(cv2.cvtColor(master, cv2.COLOR_BGR2GRAY), None)
             if md is None:
                 continue
-            matches = matcher.match(desc, md)
-            score = min(1.0, len(matches) / max(18, min(len(keys), len(mk))))
+            score = _geometric_score(matcher.match(desc, md), keys, mk)
             if score > best[1]:
                 best = (definition, score)
         return best
@@ -70,6 +104,10 @@ registry = TemplateRegistry()
 
 
 def canonical_image_path(template_id: str) -> Path:
+    for root in TEMPLATE_ROOTS:
+        candidate = root / template_id / "blank_preview.png"
+        if candidate.exists():
+            return candidate
     return TEMPLATE_ROOT / template_id / "blank_preview.png"
 
 

@@ -5,6 +5,7 @@ extraction inferred from the upload: the template numbers are exact, so a regene
 value lands where the blank form actually puts it, independent of capture quality.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -79,13 +80,30 @@ def regenerate(
     return doc.tobytes()
 
 
+def label_key(label: str) -> str:
+    """Stable field id derived from a label, for fields with no canonical mapping.
+
+    Derived templates name such fields this way, so regeneration must key their values
+    identically or an unknown form would regenerate almost entirely blank.
+    """
+    base = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "field"
+    return base if base[0].isalpha() else f"f_{base}"
+
+
 def values_from_analysis(analysis) -> dict[str, Any]:
-    """Collapse an analysis into canonical key -> value, ignoring unmapped fields."""
-    return {
-        field.canonical_key: field.normalized_value
-        for field in analysis.detected_fields
-        if field.canonical_key is not None and field.normalized_value not in (None, "")
-    }
+    """Collapse an analysis into field id -> value.
+
+    Each field is offered under its canonical key when it has one, and always under its
+    label-derived key, so both registry-backed templates and derived ones resolve.
+    """
+    values: dict[str, Any] = {}
+    for field in analysis.detected_fields:
+        if field.normalized_value in (None, ""):
+            continue
+        values.setdefault(label_key(field.label_text), field.normalized_value)
+        if field.canonical_key:
+            values[field.canonical_key] = field.normalized_value
+    return values
 
 
 def stored_values_path(folder: Path) -> Path:
