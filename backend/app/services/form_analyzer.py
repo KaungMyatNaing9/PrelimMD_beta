@@ -17,7 +17,7 @@ from app.services.field_layout import (
     label_for_box,
     partition,
 )
-from app.services.templates import registry
+from app.services.templates import MATCH_THRESHOLD, registry
 from app.services.word_source import (
     Word,
     group_lines_exact,
@@ -307,7 +307,11 @@ class FormAnalyzer:
         if colour is not None:
             try:
                 definition, match_score = registry.match(colour, template_hint)
-                matched = definition.template_id if definition and match_score >= 0.12 else None
+                matched = (
+                    definition.template_id
+                    if definition and match_score >= MATCH_THRESHOLD
+                    else None
+                )
             except RuntimeError:
                 matched = None
 

@@ -6,6 +6,7 @@ export async function getRun(id:string){const r=await fetch(`${BASE}/api/v1/runs
 export async function correct(id:string,field:string,value:unknown){const r=await fetch(`${BASE}/api/v1/runs/${id}/fields/${field}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({value,reviewed:true})});if(!r.ok)throw new Error(await r.text())}
 export const imageUrl=(path:string)=>`${BASE}${path}`;
 export const regenerateUrl=(id:string)=>`${BASE}/api/v1/form-analyses/${id}/regenerate`;
+export async function deriveTemplate(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/derive-template`,{method:"POST"});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{template_id:string;field_count:number}>}
 export async function analyze(file:File){const body=new FormData();body.append("file",file);const r=await fetch(`${BASE}/api/v1/form-analyses`,{method:"POST",body});if(!r.ok)throw new Error(await r.text());return r.json()}
 export async function getAnalysis(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return r.json()}
 export async function correctAnalysis(id:string,field:string,value:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/fields/${field}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({value,reviewed:true})});if(!r.ok)throw new Error(await r.text())}

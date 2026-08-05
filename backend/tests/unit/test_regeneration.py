@@ -82,18 +82,23 @@ def test_unknown_template_is_reported(template):
         regenerate(template, {})
 
 
-def test_values_from_analysis_skips_unmapped_and_empty_fields():
+def test_values_from_analysis_skips_blank_fields_but_keeps_unmapped_ones():
     class Field:
-        def __init__(self, key, value):
-            self.canonical_key, self.normalized_value = key, value
+        def __init__(self, key, label, value):
+            self.canonical_key, self.label_text, self.normalized_value = key, label, value
 
     class Analysis:
         def __init__(self):
             self.detected_fields = [
-                Field("patient.age", "58"),
-                Field(None, "orphan"),
-                Field("patient.phone", None),
-                Field("notes.visit", ""),
+                Field("patient.age", "Age", "58"),
+                Field(None, "Blood group", "O+"),
+                Field("patient.phone", "Phone", None),
+                Field("notes.visit", "Visit notes", ""),
             ]
 
-    assert values_from_analysis(Analysis()) == {"patient.age": "58"}
+    values = values_from_analysis(Analysis())
+    assert values["patient.age"] == "58"
+    # Unmapped fields carry most of an unknown form's content, so they must survive.
+    assert values["blood_group"] == "O+"
+    assert "patient.phone" not in values and "phone" not in values
+    assert "notes.visit" not in values
