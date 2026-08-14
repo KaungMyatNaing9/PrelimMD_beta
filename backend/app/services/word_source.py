@@ -91,16 +91,18 @@ def group_lines_tolerant(words: list[Word]) -> list[list[Word]]:
         return []
     heights = sorted(w.y1 - w.y0 for w in words)
     median_height = heights[len(heights) // 2]
-    tolerance = max(1.0, median_height * 0.6)
+    # Swept against FUNSD: tighter fragments long labels, looser merges adjacent rows.
+    tolerance = max(1.0, median_height * 0.8)
 
     rows: list[list[Word]] = []
     centre_of: list[float] = []
     for word in sorted(words, key=lambda w: (w.y0 + w.y1) / 2):
         centre = (word.y0 + word.y1) / 2
+        # The anchor is fixed when a row opens and never moves. A running mean lets the
+        # reference creep downward as words accumulate, so a dense paragraph's row
+        # gradually swallows the row beneath it and their words interleave.
         if rows and abs(centre - centre_of[-1]) <= tolerance:
             rows[-1].append(word)
-            # Running mean keeps the reference centred as the row accumulates.
-            centre_of[-1] += (centre - centre_of[-1]) / len(rows[-1])
         else:
             rows.append([word])
             centre_of.append(centre)
@@ -108,14 +110,18 @@ def group_lines_tolerant(words: list[Word]) -> list[list[Word]]:
     gap_limit = max(2.0, median_height * 2.0)
     lines: list[list[Word]] = []
     for row in rows:
+        ordered = sorted(row, key=lambda w: w.x0)
         segment: list[Word] = []
-        for word in sorted(row, key=lambda w: w.x0):
-            # A colon already in the segment means we are past a label and into its
-            # value, where a wide gap is just tab-stop alignment, not a column break.
-            splittable = segment and not any(":" in z.text for z in segment)
-            if splittable and word.x0 - segment[-1].x1 > gap_limit:
-                lines.append(segment)
-                segment = []
+        for i, word in enumerate(ordered):
+            if segment and word.x0 - segment[-1].x1 > gap_limit:
+                # A gap mid-value is tab-stop alignment ("Name:    Robert"), so hold the
+                # segment together. But if a colon appears further along the row, a second
+                # label starts there and the two fields must not be welded into one.
+                mid_value = any(":" in z.text for z in segment)
+                starts_new_label = any(":" in z.text for z in ordered[i:])
+                if not mid_value or starts_new_label:
+                    lines.append(segment)
+                    segment = []
             segment.append(word)
         if segment:
             lines.append(segment)
