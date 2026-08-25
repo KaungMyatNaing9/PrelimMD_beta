@@ -10,3 +10,5 @@ export async function deriveTemplate(id:string){const r=await fetch(`${BASE}/api
 export async function analyze(file:File){const body=new FormData();body.append("file",file);const r=await fetch(`${BASE}/api/v1/form-analyses`,{method:"POST",body});if(!r.ok)throw new Error(await r.text());return r.json()}
 export async function getAnalysis(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return r.json()}
 export async function correctAnalysis(id:string,field:string,value:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/fields/${field}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({value,reviewed:true})});if(!r.ok)throw new Error(await r.text())}
+export type StoredForm={analysis_id:string;source_type:string;field_count:number;review_count:number;matched_known_template:string|null;stored_at:string};
+export async function listAnalyses(){const r=await fetch(`${BASE}/api/v1/form-analyses`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return (await r.json()).analyses as StoredForm[]}

@@ -3,7 +3,12 @@
 # Usage: scripts/demo_roundtrip.sh [path/to/form.jpg] [api-url]
 set -euo pipefail
 
-FILE="${1:-data/corpus/test/T01/T01_TEST_003/source.jpg}"
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <form.jpg|form.png|form.pdf> [api-url]" >&2
+  echo "Name the form explicitly — this never picks a sample for you." >&2
+  exit 2
+fi
+FILE="$1"
 API="${2:-http://127.0.0.1:8000}"
 PY="${PY:-.venv312/bin/python}"
 
