@@ -89,6 +89,46 @@ def ink_ratio(gray: np.ndarray, box: Box) -> float:
     return float((crop < 128).mean()) if crop.size else 0.0
 
 
+# A write-rule is long enough to hold an answer and thin enough not to be a box edge.
+MIN_RULE_WIDTH_FRACTION = 0.04
+WRITE_HEIGHT_FRACTION = 0.022
+
+
+def detect_write_rules(image_path: Path, boxes: list[Box]) -> list[Box]:
+    """Find ruled lines a person writes *on*, as the region just above each.
+
+    Corpus forms draw a closed box per field, but real intake forms mostly print a rule
+    ("Full Legal Name: ______"). Those carry no box for ``detect_boxes`` to find, so a
+    real form yields almost no fields until the rules themselves are treated as
+    answer regions.
+    """
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        return []
+    h, w = image.shape
+    binary = cv2.adaptiveThreshold(
+        image, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10
+    )
+    horizontal = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 30), 1))
+    )
+
+    write_height = max(12.0, h * WRITE_HEIGHT_FRACTION)
+    found: list[Box] = []
+    contours, _ = cv2.findContours(horizontal, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        if bw < w * MIN_RULE_WIDTH_FRACTION or bh > max(4, h // 300):
+            continue
+        # A box's own top or bottom edge is also a horizontal run; skip those or every
+        # boxed field would be counted twice.
+        if any(b.x0 - 4 <= x <= b.x1 + 4 and b.y0 - 4 <= y <= b.y1 + 4 for b in boxes):
+            continue
+        found.append(Box(float(x), float(max(0, y - write_height)), float(x + bw), float(y)))
+
+    return [b for b in found if not any(_iou(b, k) > 0.5 for k in boxes)]
+
+
 def _iou(a: Box, b: Box) -> float:
     overlap = _span(a.x0, a.x1, b.x0, b.x1) * _span(a.y0, a.y1, b.y0, b.y1)
     union = a.width * a.height + b.width * b.height - overlap
@@ -135,7 +175,9 @@ def _span(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
-def label_for_box(box: Box, candidates: list[list[Word]]) -> list[Word] | None:
+def label_for_box(
+    box: Box, candidates: list[list[Word]], left_only: bool = False
+) -> list[Word] | None:
     """Pick the label line nearest to a box, preferring one directly above it.
 
     A label must overlap the box on the perpendicular axis, so a caption belonging to a
@@ -147,10 +189,10 @@ def label_for_box(box: Box, candidates: list[list[Word]]) -> list[Word] | None:
     for line in candidates:
         x0, y0 = min(w.x0 for w in line), min(w.y0 for w in line)
         x1, y1 = max(w.x1 for w in line), max(w.y1 for w in line)
-        if y1 <= box.y0 + 2 and _span(x0, x1, box.x0, box.x1) > 0:
+        if not left_only and y1 <= box.y0 + 2 and _span(x0, x1, box.x0, box.x1) > 0:
             distance = box.y0 - y1  # above
         elif x1 <= box.x0 + 2 and _span(y0, y1, box.y0, box.y1) > 0:
-            distance = (box.x0 - x1) * 1.5  # left, mildly penalised against an above-label
+            distance = (box.x0 - x1) * (1.0 if left_only else 1.5)
         else:
             continue
         if distance <= reach and (best is None or distance < best[0]):
