@@ -11,7 +11,11 @@ class Settings(BaseSettings):
     max_pdf_pages: int = Field(default=5, ge=1, le=20)
     default_review_threshold: float = Field(default=0.75, ge=0, le=1)
     ocr_language: str = "eng"
+    # "disabled" | "ollama" (local, free, no data egress) | "anthropic" (paid API)
     vision_provider: str = "disabled"
+    vision_model: str = ""
+    vision_api_key: str = ""
+    vision_timeout_seconds: int = Field(default=120, ge=5, le=600)
 
 
 settings = Settings()
