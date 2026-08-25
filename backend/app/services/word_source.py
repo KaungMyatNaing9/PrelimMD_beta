@@ -66,7 +66,42 @@ def words_from_image(image_path: Path, language: str) -> list[Word]:
                 confidence / 100,
             )
         )
-    return words
+    return _drop_rule_artifacts(words)
+
+
+# A rule line read as a glyph is short text with a shape no real character has: a box
+# border spanning the field height, or a horizontal rule far wider than it is tall.
+MAX_GLYPH_ASPECT = 3.0
+MAX_GLYPH_HEIGHT_RATIO = 2.0
+MIN_ARTIFACT_CONFIDENCE = 0.5
+
+
+def _drop_rule_artifacts(words: list[Word]) -> list[Word]:
+    """Remove OCR reads that are really the form's own rule lines.
+
+    Tesseract reports a box's vertical border as ``|`` or ``i`` and its horizontal rule
+    as ``-``, ``=`` or ``7``. Left in, they corrupt values ("Taylor Morgan |") or replace
+    them outright, and they are indistinguishable from real text by string content alone
+    — the tell is geometry.
+    """
+    if not words:
+        return words
+    heights = sorted(w.y1 - w.y0 for w in words)
+    median_height = heights[len(heights) // 2]
+
+    kept = []
+    for word in words:
+        text = word.text.strip()
+        width, height = word.x1 - word.x0, word.y1 - word.y0
+        # Only short reads are ever ambiguous; real words are never mistaken for a rule.
+        if len(text) <= 2 and height > 0:
+            too_wide = width / height > MAX_GLYPH_ASPECT
+            too_tall = height > median_height * MAX_GLYPH_HEIGHT_RATIO
+            unsure = word.confidence < MIN_ARTIFACT_CONFIDENCE
+            if too_wide or too_tall or unsure:
+                continue
+        kept.append(word)
+    return kept
 
 
 def group_lines_exact(words: list[Word]) -> list[list[Word]]:
@@ -75,6 +110,31 @@ def group_lines_exact(words: list[Word]) -> list[list[Word]]:
     for word in words:
         groups.setdefault((word.block, round(word.y0, 1)), []).append(word)
     return [sorted(line, key=lambda w: w.x0) for line in groups.values()]
+
+
+# A label rarely runs past four words, and a caption sits a space from its colon while a
+# value is separated from the next column by the remainder of its rule line.
+MAX_LABEL_WORDS = 4
+LABEL_GAP_RATIO = 1.2
+
+
+def label_run_start(line: list[Word], lower: int, colon: int) -> int:
+    """Index where the label ending at ``colon`` begins, no earlier than ``lower``.
+
+    Walks left from the colon while each word still sits within a normal space of the one
+    after it. The wide gap left by an unfilled rule is what separates the previous field's
+    value from this label, so distance decides the split rather than word shape -- a
+    surname and a caption are indistinguishable as text.
+    """
+    if not line:
+        return colon
+    em = sorted(z.y1 - z.y0 for z in line)[len(line) // 2]
+    start = colon
+    while start > lower and colon - start + 1 < MAX_LABEL_WORDS:
+        if line[start].x0 - line[start - 1].x1 > em * LABEL_GAP_RATIO:
+            break
+        start -= 1
+    return start
 
 
 def group_lines_tolerant(words: list[Word]) -> list[list[Word]]:
@@ -118,7 +178,11 @@ def group_lines_tolerant(words: list[Word]) -> list[list[Word]]:
                 # segment together. But if a colon appears further along the row, a second
                 # label starts there and the two fields must not be welded into one.
                 mid_value = any(":" in z.text for z in segment)
-                starts_new_label = any(":" in z.text for z in ordered[i:])
+                nxt = next((j for j in range(i, len(ordered)) if ":" in ordered[j].text), None)
+                # Split only at the gap the next label actually begins after. Splitting at
+                # the first wide gap cut a label from its own value, because the unfilled
+                # remainder of its rule is wider than the space before the next column.
+                starts_new_label = nxt is not None and label_run_start(ordered, i, nxt) == i
                 if not mid_value or starts_new_label:
                     lines.append(segment)
                     segment = []

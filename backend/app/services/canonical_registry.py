@@ -32,6 +32,13 @@ FIELDS = [
     ),
     ("patient.email", "Email", "demographics", FieldType.SHORT_TEXT, ["Email", "Email Address"]),
     (
+        "patient.address",
+        "Address",
+        "demographics",
+        FieldType.SHORT_TEXT,
+        ["Address", "Street Address", "Home Address", "Mailing Address", "Street"],
+    ),
+    (
         "insurance.member_id",
         "Insurance member ID",
         "insurance",

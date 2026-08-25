@@ -13,6 +13,7 @@ from app.services.field_layout import (
     MARKED_INK_RATIO,
     Box,
     detect_boxes,
+    detect_write_rules,
     ink_ratio,
     label_for_box,
     partition,
@@ -22,6 +23,7 @@ from app.services.word_source import (
     Word,
     group_lines_exact,
     group_lines_tolerant,
+    label_run_start,
     words_from_image,
     words_from_pdf,
 )
@@ -34,6 +36,14 @@ HEADINGS = {
     "insurance information",
     "medical history",
     "consent",
+    # Section titles standard across intake forms. A frame drawn around a section
+    # captures its title, which would otherwise be reported as a patient's answer.
+    "patient demographic information",
+    "patient information",
+    "primary insurance",
+    "secondary insurance",
+    "workers compensationauto",  # norm() drops the slash
+    "responsible party",
 }
 
 
@@ -44,6 +54,17 @@ def box(words, w, h):
         width=(max(x[2] for x in words) - min(x[0] for x in words)) / w,
         height=(max(x[3] for x in words) - min(x[1] for x in words)) / h,
     )
+
+
+def is_blank_marker(text) -> bool:
+    """True for a printed fill-in line rather than an answer.
+
+    Real forms mark an empty field with a rule to write on — a run of underscores,
+    dots or dashes. Read literally that becomes the field's value, so a blank form
+    comes back fully "filled" with punctuation.
+    """
+    stripped = "".join(str(text or "").split())
+    return bool(stripped) and all(c in "_.-–—…·:" for c in stripped)
 
 
 def normalize(v, t):
@@ -91,6 +112,7 @@ def _mean_confidence(words: list[Word]) -> float:
     return sum(x.confidence for x in words) / len(words) if words else 0.0
 
 
+
 def _fields_with_lines(
     lines: list[list[Word]], w: float, h: float, source: str
 ) -> list[tuple[list[Word], DetectedFormField]]:
@@ -104,63 +126,98 @@ def _fields_with_lines(
     fields = []
     for i, line in enumerate(lines):
         texts = [z.text for z in line]
-        joined = " ".join(texts)
-        if ":" not in joined or norm(joined.split(":", 1)[0]) in HEADINGS:
+        if ":" not in " ".join(texts):
             continue
-        colon = next(j for j, t in enumerate(texts) if ":" in t)
-        label = " ".join(texts[: colon + 1]).rstrip(":")
-        answer = " ".join(texts[colon + 1 :]) or None
-        mapped, score, reason = match(label)
-        typ = mapped.value_type if mapped else FieldType.SHORT_TEXT
-        label_words, answer_words = line[: colon + 1], line[colon + 1 :]
-        lb = box(label_words, w, h)
-        ab = (
-            box(answer_words, w, h)
-            if answer
-            else BoundingBox(
-                x=min(0.98, lb.x + lb.width + 0.05),
-                y=lb.y,
-                width=max(0.02, 0.92 - lb.x - lb.width),
-                height=lb.height,
+        colons = [j for j, t in enumerate(texts) if ":" in t]
+        start = 0
+        for k, colon in enumerate(colons):
+            # A value ends where the next column's label begins, not at end of line. On a
+            # two-column row ("Last Name: ___ Home Phone: ___") the first field otherwise
+            # swallows the whole right-hand column and reports its last token as the value.
+            stop = (
+                label_run_start(line, colon + 1, colons[k + 1])
+                if k + 1 < len(colons)
+                else len(texts)
             )
-        )
-        if is_ocr:
-            detection = _mean_confidence(label_words)
-            confidence = _mean_confidence(answer_words) if answer else 0.6
-        else:
-            detection, confidence = 0.95, (0.92 if answer else 0.6)
-        fields.append(
-            (
-                line,
-                DetectedFormField(
-                    field_id=f"field_{i}",
-                    page_index=0,
-                    label_text=label,
-                    normalized_label=norm(label),
-                    field_type=typ,
-                    label_bbox=lb,
-                    answer_bbox=ab,
-                    required_status=RequiredStatus.UNKNOWN,
-                    required_confidence=0.3,
-                    detection_confidence=detection,
-                    source=source,
-                    canonical_key=mapped.canonical_key if mapped else None,
-                    mapping_confidence=score,
-                    mapping_reason=reason,
-                    raw_value=answer,
-                    normalized_value=normalize(answer, typ) if answer else None,
-                    is_blank=answer is None,
-                    confidence=confidence,
-                    needs_review=not bool(mapped)
-                    or answer is None
-                    or (is_ocr and confidence < settings.default_review_threshold),
-                ),
+            label_words, answer_words = line[start : colon + 1], line[colon + 1 : stop]
+            label = " ".join(texts[start : colon + 1]).rstrip(":")
+            if not label or norm(label) in HEADINGS:
+                start = stop
+                continue
+            answer = " ".join(texts[colon + 1 : stop]) or None
+            if is_blank_marker(answer):
+                answer = None
+            mapped, score, reason = match(label)
+            typ = mapped.value_type if mapped else FieldType.SHORT_TEXT
+            lb = box(label_words, w, h)
+            if answer:
+                ab = box(answer_words, w, h)
+            else:
+                # An empty field still needs a region to draw and to refill, bounded by the
+                # next label so it does not stretch across the neighbouring column.
+                right = (
+                    min(z.x0 for z in line[stop:]) / w if stop < len(texts) else 0.92
+                )
+                left = min(0.98, lb.x + lb.width + 0.01)
+                ab = BoundingBox(
+                    x=left, y=lb.y, width=max(0.02, right - left), height=lb.height
+                )
+            field_id = f"field_{i}" if len(colons) == 1 else f"field_{i}_{k}"
+            start = stop
+            if is_ocr:
+                detection = _mean_confidence(label_words)
+                confidence = _mean_confidence(answer_words) if answer else 0.6
+            else:
+                detection, confidence = 0.95, (0.92 if answer else 0.6)
+            fields.append(
+                (
+                    line,
+                    DetectedFormField(
+                        field_id=field_id,
+                        page_index=0,
+                        label_text=label,
+                        normalized_label=norm(label),
+                        field_type=typ,
+                        label_bbox=lb,
+                        answer_bbox=ab,
+                        required_status=RequiredStatus.UNKNOWN,
+                        required_confidence=0.3,
+                        detection_confidence=detection,
+                        source=source,
+                        canonical_key=mapped.canonical_key if mapped else None,
+                        mapping_confidence=score,
+                        mapping_reason=reason,
+                        raw_value=answer,
+                        normalized_value=normalize(answer, typ) if answer else None,
+                        is_blank=answer is None,
+                        confidence=confidence,
+                        needs_review=not bool(mapped)
+                        or answer is None
+                        or (is_ocr and confidence < settings.default_review_threshold),
+                    ),
+                )
             )
-        )
     return fields
 
 
 MARK_TYPES = (FieldType.CHECKBOX, FieldType.SIGNATURE_PRESENCE)
+
+# Captions a section frame encloses. A patient's answer does not carry a label's colon,
+# and a run of several title-case words with no digits is a caption row, not a value.
+CAPTION_WORDS = 3
+
+
+def _is_printed_caption(answer: str | None) -> bool:
+    if not answer:
+        return False
+    # "Secondary Insurance (If applicable)" is the same title as "Secondary Insurance".
+    bare = norm(answer.split("(")[0])
+    if ":" in answer or bare in HEADINGS:
+        return True
+    words = answer.split()
+    return len(words) >= CAPTION_WORDS and all(
+        z[:1].isupper() and z.isalpha() for z in words
+    )
 
 
 def _build_box_fields(
@@ -170,14 +227,18 @@ def _build_box_fields(
     w: float,
     h: float,
     gray=None,
+    rule_indices: set[int] | None = None,
 ) -> tuple[list[DetectedFormField], set[int]]:
     """Bind each detected input box to its nearest label; the value is what OCR read
     inside the box. Returns the fields plus the ids of lines consumed as labels, so the
     colon pass does not re-emit them. ``candidates`` must be the same list objects the
     caller later iterates, since identity is what marks a line as used."""
+    rule_indices = rule_indices or set()
     fields, used = [], set()
     for i, (bx, value_words) in enumerate(zip(boxes, contents)):
-        label_words = label_for_box(bx, candidates)
+        # On a ruled field the caption is always to the left; text above the rule is
+        # the previous field's sub-caption ("Last", "STREET") and must not be taken.
+        label_words = label_for_box(bx, candidates, left_only=i in rule_indices)
         if not label_words:
             continue
         used.add(id(label_words))
@@ -197,6 +258,15 @@ def _build_box_fields(
                 )
                 or None
             )
+            if is_blank_marker(answer):
+                answer = None
+            if _is_printed_caption(answer):
+                # A section frame ("Primary Insurance") encloses the captions of the
+                # fields inside it, so binding it as an answer reports the form's own
+                # printed text as a patient value. Blank it rather than drop the field:
+                # the count of bound boxes is what scores the boxed strategy against the
+                # inline one, and dropping these flipped whole pages to the wrong reader.
+                answer = None
             normalized = normalize(answer, typ) if answer else None
             confidence = _mean_confidence(value_words) if answer else 0.6
         fields.append(
@@ -318,10 +388,17 @@ class FormAnalyzer:
         # A form is either boxed (label above or left of a drawn box) or inline
         # ("label: value" on one row). Running both and merging makes the two compete
         # for the same labels, so score each and keep whichever reads the page better.
+        # Closed boxes and ruled write-lines are both answer regions; corpus forms use
+        # the first, real intake forms mostly the second.
         boxes = detect_boxes(page_image)
+        rules = detect_write_rules(page_image, boxes)
+        rule_indices = set(range(len(boxes), len(boxes) + len(rules)))
+        boxes += rules
         contents, free = partition(boxes, words)
         gray = cv2.imread(str(page_image), cv2.IMREAD_GRAYSCALE)
-        boxed, _ = _build_box_fields(boxes, contents, group_lines_tolerant(free), w, h, gray)
+        boxed, _ = _build_box_fields(
+            boxes, contents, group_lines_tolerant(free), w, h, gray, rule_indices
+        )
         inline = [f for _, f in _fields_with_lines(group_lines_tolerant(words), w, h, "ocr")]
 
         def reads(candidate: list[DetectedFormField]) -> tuple[int, int]:
