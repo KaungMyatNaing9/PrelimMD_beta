@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -59,6 +60,39 @@ async def create_form_analysis(file: UploadFile = File(...), template_id: str | 
     analysis = FormAnalyzer().analyze(analysis_id, folder, template_id)
     (folder / "analysis.json").write_text(analysis.model_dump_json(indent=2))
     return analysis
+
+
+@app.get("/api/v1/form-analyses")
+def list_form_analyses(limit: int = 50):
+    """Stored forms, newest first, for the browser."""
+    from app.schemas.form_understanding import FormAnalysis
+
+    root = settings.artifact_root.resolve()
+    if not root.is_dir():
+        return {"analyses": []}
+
+    stored = []
+    for folder in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        record = folder / "analysis.json"
+        if not record.is_file():
+            continue
+        try:
+            analysis = FormAnalysis.model_validate_json(record.read_text())
+        except ValueError:
+            continue  # a partial or older record shouldn't break the listing
+        stored.append(
+            {
+                "analysis_id": analysis.analysis_id,
+                "source_type": analysis.source_type,
+                "field_count": len(analysis.detected_fields),
+                "review_count": sum(f.needs_review for f in analysis.detected_fields),
+                "matched_known_template": analysis.matched_known_template,
+                "stored_at": datetime.fromtimestamp(record.stat().st_mtime, tz=UTC).isoformat(),
+            }
+        )
+        if len(stored) >= limit:
+            break
+    return {"analyses": stored}
 
 
 @app.get("/api/v1/form-analyses/{analysis_id}")

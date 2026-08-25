@@ -59,13 +59,19 @@ def _load_first_page(source: Path, kind: str) -> Image.Image:
             ],
             check=True,
             capture_output=True,
-            timeout=30,
+            timeout=60,
         )
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise HTTPException(
             422, "PDF rasterization requires the local Poppler pdftoppm tool"
         ) from exc
-    return Image.open(str(output_prefix) + "-1.png").convert("RGB")
+    # pdftoppm zero-pads the page number to the page count's width, so a 10+ page
+    # document yields "raster-01.png" rather than "raster-1.png". Real intake packets
+    # routinely run past ten pages, so match whatever it actually wrote.
+    pages = sorted(output_prefix.parent.glob(f"{output_prefix.name}-*.png"))
+    if not pages:
+        raise HTTPException(422, "PDF produced no rasterized page")
+    return Image.open(pages[0]).convert("RGB")
 
 
 def preprocess(source: Path, kind: str, run_dir: Path) -> PreprocessingResult:
