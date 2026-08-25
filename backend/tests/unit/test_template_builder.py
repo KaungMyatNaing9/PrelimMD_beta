@@ -26,7 +26,8 @@ def test_ink_flush_against_the_top_edge_is_still_erased():
     page = np.full((1000, 1000, 3), 255, dtype=np.uint8)
     page[105:130, 150:400] = 0  # text just inside a tall box starting at y=100
 
-    blank = blank_from_filled(page, [BoundingBox(x=0.1, y=0.1, width=0.6, height=0.4)])
+    # A plausible multi-line field: wide, but not so tall it becomes a section frame.
+    blank = blank_from_filled(page, [BoundingBox(x=0.1, y=0.1, width=0.6, height=0.15)])
 
     assert blank[105:130, 150:400].all(), "text near the top edge should be gone"
 
