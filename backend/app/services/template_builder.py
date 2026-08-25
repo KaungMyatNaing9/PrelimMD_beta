@@ -31,6 +31,11 @@ from app.services.templates import DERIVED_ROOT, registry
 
 # Corpus masters own T01-T49; derived templates are allocated above that so the two never
 # collide. TemplateDefinition constrains ids to T followed by two digits.
+# The largest real answer region measured in the corpus (a multi-line notes box)
+# covers 0.07 of the page. Anything appreciably larger is a section frame whose
+# printed captions must survive into the blank master, so it is left alone.
+MAX_ERASABLE_AREA_FRACTION = 0.12
+
 DERIVED_ID_START = 50
 DERIVED_ID_END = 99
 
@@ -71,6 +76,13 @@ def blank_from_filled(image: np.ndarray, boxes: list[BoundingBox]) -> np.ndarray
     # first line of text un-erased, since values sit flush against the top edge.
     inset = max(2, round(min(height, width) * 0.003))
     for box in boxes:
+        # A section frame ("Primary Insurance") encloses printed captions of its own.
+        # Erasing its interior strips those from the blank master and mangles the form,
+        # so only clear regions small enough to be a single answer.
+        # bbox dimensions are page fractions, so their product is already the share of
+        # the page this region covers.
+        if box.width * box.height > MAX_ERASABLE_AREA_FRACTION:
+            continue
         x0, y0 = int(box.x * width) + inset, int(box.y * height) + inset
         x1, y1 = int((box.x + box.width) * width) - inset, int((box.y + box.height) * height) - inset
         if x1 > x0 and y1 > y0:
@@ -109,7 +121,14 @@ def derive_template(
     used: set[str] = set()
     fields = []
     for field in boxed:
-        field_id = field.canonical_key or _slug(field.label_text, used)
+        # Real forms repeat a caption per section — "Name" and "Phone Number" appear
+        # under primary insurance, secondary insurance and emergency contact alike. Two
+        # of them mapping to the same canonical key must still get distinct ids, or the
+        # page fails validation and no template can be built at all.
+        base = field.canonical_key or _slug(field.label_text, set())
+        field_id, n = base, 2
+        while field_id in used:
+            field_id, n = f"{base}_{n}", n + 1
         used.add(field_id)
         fields.append(
             TemplateField(

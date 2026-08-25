@@ -70,15 +70,24 @@ class TemplateRegistry:
     def match(
         self, image: np.ndarray, hint: str | None = None
     ) -> tuple[TemplateDefinition | None, float]:
-        if hint:
-            try:
-                return self.get(hint), 1.0
-            except KeyError:
-                return None, 0.0
+        """Identify the template a page came from, with its measured confidence.
+
+        A ``hint`` narrows the search to one template; it does **not** assert a match.
+        The returned score is always measured against the image, so a caller naming the
+        wrong template gets a low score rather than false certainty.
+        """
         if cv2 is None:
             raise RuntimeError(
                 "OpenCV is required for template matching; install backend dependencies"
             )
+        if hint:
+            try:
+                candidates = [self.get(hint)]
+            except KeyError:
+                return None, 0.0
+        else:
+            candidates = self.all()
+
         # ORB feature matching against safe synthetic blank masters. A completed form retains its frame/labels.
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         orb = cv2.ORB_create(1200)
@@ -87,7 +96,7 @@ class TemplateRegistry:
             return None, 0.0
         matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         best: tuple[TemplateDefinition | None, float] = (None, 0.0)
-        for definition in self.all():
+        for definition in candidates:
             master = cv2.imread(str(canonical_image_path(definition.template_id)))
             if master is None:
                 continue
