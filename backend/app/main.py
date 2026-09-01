@@ -104,7 +104,11 @@ def get_form_analysis(analysis_id: str):
 
 @app.get("/api/v1/form-analyses/{analysis_id}/pages/{page_index}/image")
 def analysis_image(analysis_id: str, page_index: int):
-    return FileResponse(run_dir(analysis_id) / "normalized_color.png", media_type="image/png")
+    folder = run_dir(analysis_id)
+    page = folder / ("normalized_color.png" if page_index == 0 else f"page_{page_index}.png")
+    if not page.exists():
+        raise HTTPException(404, f"No image for page {page_index}")
+    return FileResponse(page, media_type="image/png")
 
 
 @app.get("/api/v1/form-analyses/{analysis_id}/pages/{page_index}/overlay")
