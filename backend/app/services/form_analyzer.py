@@ -21,6 +21,7 @@ from app.services.field_layout import (
     label_for_box,
     partition,
 )
+from app.services.field_validity import plausible
 from app.services.templates import MATCH_THRESHOLD, registry
 from app.services.word_source import (
     Word,
@@ -187,7 +188,12 @@ def _fields_with_lines(
                         confidence=confidence,
                         needs_review=not bool(mapped)
                         or answer is None
-                        or (is_ocr and confidence < settings.default_review_threshold),
+                        or (is_ocr and confidence < settings.default_review_threshold)
+                        # A value that does not look like a credible answer of its type is
+                        # the dangerous case: presented as read, and wrong. Flagging costs
+                        # a reviewer a glance; not flagging costs a wrong patient record.
+                        or plausible(normalize(answer, typ) if answer else None, typ)
+                        < SUSPECT,
                     ),
                 )
             )
@@ -197,6 +203,10 @@ def _fields_with_lines(
 # The PDF page is rendered at twice its point size so thin rule lines survive for
 # morphological detection.
 PDF_RENDER_SCALE = 2
+
+# Below this, a value does not look like a credible answer of its type and is surfaced for
+# review rather than presented as read.
+SUSPECT = 0.5
 
 MARK_TYPES = (FieldType.CHECKBOX, FieldType.SIGNATURE_PRESENCE)
 
@@ -432,7 +442,8 @@ def _build_box_fields(
                 confidence=confidence,
                 needs_review=not bool(mapped)
                 or answer is None
-                or confidence < settings.default_review_threshold,
+                or confidence < settings.default_review_threshold
+                or plausible(normalized, typ) < SUSPECT,
             )
         )
     return fields, used
