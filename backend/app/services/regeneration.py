@@ -31,10 +31,18 @@ def _text_for(value: Any, field_type: FieldType | str) -> str | None:
     return str(value)
 
 
-# Room left below the baseline, as a multiple of the point size. It has to clear the
-# glyph box the renderer reports rather than the nominal descent, or a value sits a
-# fraction of a point past the foot of its own field.
-DESCENDER = 0.35
+# Safety margin above the font's own descent, as a fraction of the point size. The glyph
+# box the renderer reports is a little deeper than the nominal descender, and without this
+# a value sits a fraction of a point past the foot of its own field.
+DESCENDER_MARGIN = 0.06
+
+
+def _descent(fontname: str) -> float:
+    """How far below the baseline this face reaches, as a fraction of its point size."""
+    return abs(fitz.Font(fontname).descender) + DESCENDER_MARGIN
+
+
+FONT = "helv"
 
 
 def _font_size(height_pt: float) -> float:
@@ -80,7 +88,7 @@ def regenerate(
                 rect + (2, 1, -2, -1),
                 text,
                 fontsize=size,
-                fontname="helv",
+                fontname=FONT,
                 color=(0.05, 0.05, 0.15),
                 align=fitz.TEXT_ALIGN_LEFT,
             )
@@ -92,10 +100,10 @@ def regenerate(
         # the value back on the rule. Shrinking the box instead silently renders nothing
         # when the text no longer fits.
         page.insert_text(
-            fitz.Point(rect.x0 + 2, rect.y1 - size * DESCENDER),
+            fitz.Point(rect.x0 + 2, rect.y1 - size * _descent(FONT)),
             text,
             fontsize=size,
-            fontname="helv",
+            fontname=FONT,
             color=(0.05, 0.05, 0.15),
         )
 
