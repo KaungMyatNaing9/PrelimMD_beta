@@ -130,6 +130,7 @@ def _words_from_tesseract(image_path: Path, language: str) -> list[Word]:
 
 
 RULE_RUN = re.compile(r"(_{3,})")
+RULE_ONLY = re.compile(r"^_+$")
 
 
 def _split_rules_from_text(words: list[Word]) -> list[Word]:
@@ -156,7 +157,11 @@ def _split_rules_from_text(words: list[Word]) -> list[Word]:
         at = word.x0
         for part in parts:
             width = span * len(part) / len(word.text)
-            out.append(word._replace(x0=at, x1=at + width, text=part))
+            # The rule itself is the form's own furniture, not anything a person wrote, so
+            # the cursor advances across it but no word is emitted. Keeping it would leave
+            # "____________ 08/25/2026" as the value of the field it underlines.
+            if not RULE_ONLY.match(part):
+                out.append(word._replace(x0=at, x1=at + width, text=part))
             at += width
     return out
 
