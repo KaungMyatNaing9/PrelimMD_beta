@@ -9,7 +9,10 @@ from app.services.templates import canonical_image_path, registry
 
 @pytest.fixture
 def template():
-    return registry.get("T03")
+    # A copy, not the registry's own object: one test renames the template to prove an
+    # unknown id is reported, and mutating the cached instance leaked that rename into
+    # every test that ran afterwards.
+    return registry.get("T03").model_copy(deep=True)
 
 
 def _words(pdf: bytes):
@@ -102,3 +105,46 @@ def test_values_from_analysis_skips_blank_fields_but_keeps_unmapped_ones():
     assert values["blood_group"] == "O+"
     assert "patient.phone" not in values and "phone" not in values
     assert "notes.visit" not in values
+
+
+@pytest.mark.skipif(
+    not canonical_image_path("T03").exists(), reason="blank master not generated"
+)
+def test_a_single_line_value_sits_on_the_rule_at_the_foot_of_its_field(template):
+    """Where a value is drawn vertically, which is the ~2mm placement criterion.
+
+    A person writes *on* the rule at the foot of the space. Laying text from the top of
+    the region instead put every value about 4.5mm high -- a constant offset, and the
+    single largest placement error measured on real forms.
+    """
+    pdf = regenerate(template, {"patient.full_name": "Jordan Lee"})
+    rect = _rect_of(template, "patient.full_name")
+    placed = [r for text, r in _words(pdf) if text == "Jordan"]
+    assert placed, "value was not rendered at all"
+
+    # Its foot is near the field's foot, not floating up at the top of the region.
+    from_bottom = rect.y1 - placed[0].y1
+    assert 0 <= from_bottom < rect.height * 0.25, (
+        f"value sits {from_bottom:.1f}pt above the foot of a {rect.height:.1f}pt field"
+    )
+
+
+@pytest.mark.skipif(
+    not canonical_image_path("T03").exists(), reason="blank master not generated"
+)
+def test_a_multi_line_value_starts_at_the_top_and_grows_down(template):
+    """The opposite convention, and the reason single-line placement is a special case.
+
+    A notes box is written into from its first line downwards, so top alignment is right
+    there. Bottom-aligning a multi-line value would push its later lines off the field.
+    """
+    rect = _rect_of(template, "notes.visit")
+    pdf = regenerate(template, {"notes.visit": "First line\nSecond line"})
+    words = _words(pdf)
+    first = [r for text, r in words if text == "First"]
+    second = [r for text, r in words if text == "Second"]
+    assert first and second, "multi-line value was not rendered"
+
+    assert first[0].y0 < second[0].y0, "lines are out of order"
+    assert first[0].y0 - rect.y0 < rect.height * 0.5, "first line did not start near the top"
+    assert rect.contains(second[0]), f"{second[0]} escaped its field {rect}"
