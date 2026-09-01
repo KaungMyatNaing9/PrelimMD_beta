@@ -4,6 +4,7 @@ Downstream field detection consumes ``Word`` tuples and does not care whether th
 came from a digital PDF text layer or from OCR over a rasterized page.
 """
 
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -27,7 +28,10 @@ def words_from_pdf(page) -> list[Word]:
 
     Deliberately unfiltered so grouping matches the raw ``get_text("words")`` output.
     """
-    return [Word(w[0], w[1], w[2], w[3], w[4], int(w[5]), 1.0) for w in page.get_text("words")]
+    words = [Word(w[0], w[1], w[2], w[3], w[4], int(w[5]), 1.0) for w in page.get_text("words")]
+    # A PDF that draws its rules with underscores glues them to whatever text abuts them,
+    # so the same separation the OCR path needs is needed here.
+    return _split_glued_labels(words)
 
 
 def words_from_image(image_path: Path, language: str) -> list[Word]:
@@ -125,6 +129,38 @@ def _words_from_tesseract(image_path: Path, language: str) -> list[Word]:
     return _drop_rule_artifacts(_split_glued_labels(words))
 
 
+RULE_RUN = re.compile(r"(_{3,})")
+
+
+def _split_rules_from_text(words: list[Word]) -> list[Word]:
+    """Separate a drawn rule from the text stuck to it.
+
+    A form that draws its lines with underscores gives back tokens like
+    "______________City/State/Zip:", where the rule of one field has swallowed the label of
+    the next. The colon pass then puts the boundary between the two fields in the wrong
+    place and the first one reads empty, even though its value is sitting right there.
+
+    Splitting is by character count, which is close enough for binding because both halves
+    stay on one line.
+    """
+    out: list[Word] = []
+    for word in words:
+        parts = [p for p in RULE_RUN.split(word.text) if p]
+        if len(parts) < 2:
+            out.append(word)
+            continue
+        # The rule runs are kept as parts, not discarded: dropping them collapses the
+        # offsets and the label that followed a rule lands where the rule began, which
+        # puts it to the *left* of the value written on that rule.
+        span = word.x1 - word.x0
+        at = word.x0
+        for part in parts:
+            width = span * len(part) / len(word.text)
+            out.append(word._replace(x0=at, x1=at + width, text=part))
+            at += width
+    return out
+
+
 def _split_glued_labels(words: list[Word]) -> list[Word]:
     """Separate a label from its value when OCR returns them as one token.
 
@@ -138,7 +174,7 @@ def _split_glued_labels(words: list[Word]) -> list[Word]:
     Leading rule characters are dropped from the value.
     """
     out: list[Word] = []
-    for word in words:
+    for word in _split_rules_from_text(words):
         head, sep, tail = word.text.partition(":")
         value = tail.strip("_ .")
         if not sep or not head.strip() or not value:
