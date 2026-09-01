@@ -80,7 +80,9 @@ def test_multiline_values_keep_their_rows(template):
 
 
 def test_unknown_template_is_reported(template):
-    template.template_id = "T99"
+    # Outside the range derive_template allocates from (T50-T99), so a run that learns
+    # templates cannot bring this id into existence and quietly void the test.
+    template.template_id = "T00"
     with pytest.raises(FileNotFoundError):
         regenerate(template, {})
 

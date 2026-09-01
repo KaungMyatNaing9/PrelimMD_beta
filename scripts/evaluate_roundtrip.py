@@ -13,6 +13,7 @@ clinics count.
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,8 +22,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.services.canonical_registry import match, norm
+from app.services.templates import DERIVED_ROOT, registry
 
 FORMS = ROOT / "data/real-forms"
+
+def _release(template_id: str) -> None:
+    """Delete a template learned only to score a run.
+
+    Derived ids come from a fixed range (T50-T99). A script that learns one per form per
+    run and never releases it exhausts that range, and then every later run fails.
+    """
+    folder = DERIVED_ROOT / template_id
+    if folder.exists():
+        shutil.rmtree(folder)
+    registry.load()
+
 
 
 def _curl(*args: str) -> str:
@@ -100,6 +114,7 @@ def main() -> int:
             check=True,
         )
         again = readable(analyse(args.api, out.with_name(out.stem + "-1.jpg")))
+        _release(template_id)
 
         survived = []
         for label, want in expected.items():

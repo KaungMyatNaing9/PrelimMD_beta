@@ -13,6 +13,7 @@ the distance between the two is reported in millimetres of printed page.
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +23,21 @@ import fitz
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+from app.services.templates import DERIVED_ROOT, registry
+
 FORMS = ROOT / "data/real-forms"
+
+def _release(template_id: str) -> None:
+    """Delete a template learned only to score a run.
+
+    Derived ids come from a fixed range (T50-T99). A script that learns one per form per
+    run and never releases it exhausts that range, and then every later run fails.
+    """
+    folder = DERIVED_ROOT / template_id
+    if folder.exists():
+        shutil.rmtree(folder)
+    registry.load()
+
 
 # US Letter, the size every form in the set is laid out for. Coordinates are page
 # fractions on both sides, so only this physical size converts them to millimetres.
@@ -108,6 +123,7 @@ def main() -> int:
             f"/regenerate?template_id={derived['template_id']}",
         )
         after = drawn_positions(out)
+        _release(derived["template_id"])
 
         page = []
         for field in first["detected_fields"]:
