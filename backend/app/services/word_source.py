@@ -9,6 +9,8 @@ from typing import NamedTuple
 
 from fastapi import HTTPException
 
+from app.config import settings
+
 
 class Word(NamedTuple):
     x0: float
@@ -29,6 +31,60 @@ def words_from_pdf(page) -> list[Word]:
 
 
 def words_from_image(image_path: Path, language: str) -> list[Word]:
+    """Words from whichever OCR engine is configured."""
+    if settings.ocr_engine == "rapidocr":
+        return _drop_rule_artifacts(_split_glued_labels(_words_from_rapidocr(image_path)))
+    return _words_from_tesseract(image_path, language)
+
+
+_RAPIDOCR = None
+
+
+def _rapidocr():
+    """One engine instance: loading the models costs more than reading a page."""
+    global _RAPIDOCR
+    if _RAPIDOCR is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            raise HTTPException(503, "OCR engine rapidocr is not installed") from exc
+        _RAPIDOCR = RapidOCR()
+    return _RAPIDOCR
+
+
+def _words_from_rapidocr(image_path: Path) -> list[Word]:
+    """Words from RapidOCR, which recognises a whole line at a time.
+
+    The line is the unit it is accurate on, but this pipeline is built on word geometry.
+    Asking for character boxes and splitting them on spaces recovers a box per word, and
+    the gaps stay real because they come from measured glyph positions.
+    """
+    result, _ = _rapidocr()(str(image_path), return_word_box=True)
+    words: list[Word] = []
+    for block, line in enumerate(result or []):
+        if len(line) < 6:
+            continue
+        char_boxes, chars, scores = line[3], line[4], line[5]
+        run: list[int] = []
+        for index, char in list(enumerate(chars)) + [(None, " ")]:
+            if char != " " and index is not None:
+                run.append(index)
+                continue
+            if run:
+                xs = [pt[0] for i in run for pt in char_boxes[i]]
+                ys = [pt[1] for i in run for pt in char_boxes[i]]
+                words.append(
+                    Word(
+                        float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys)),
+                        "".join(chars[i] for i in run), block,
+                        sum(scores[i] for i in run) / len(run),
+                    )
+                )
+                run = []
+    return words
+
+
+def _words_from_tesseract(image_path: Path, language: str) -> list[Word]:
     """Words from Tesseract OCR over a preprocessed page image.
 
     Coordinates are pixels in ``image_path``; confidence is Tesseract's 0-100 score

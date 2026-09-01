@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     ocr_language: str = "eng"
     # "disabled" | "ollama" (local, free, no data egress) | "anthropic" (paid API)
     vision_provider: str = "disabled"
+    ocr_engine: str = "tesseract"
     vision_model: str = ""
     vision_api_key: str = ""
     vision_timeout_seconds: int = Field(default=120, ge=5, le=600)
