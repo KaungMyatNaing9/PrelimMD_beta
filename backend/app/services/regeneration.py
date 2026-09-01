@@ -90,20 +90,64 @@ def label_key(label: str) -> str:
     return base if base[0].isalpha() else f"f_{base}"
 
 
-def values_from_analysis(analysis) -> dict[str, Any]:
+def values_from_analysis(analysis, template=None, page_index: int = 0) -> dict[str, Any]:
     """Collapse an analysis into field id -> value.
 
-    Each field is offered under its canonical key when it has one, and always under its
-    label-derived key, so both registry-backed templates and derived ones resolve.
+    Two ways a value finds its slot, in order of trustworthiness:
+
+    *Position* first, when a template is given. A derived template names its fields from
+    the *geometric* reading of the page, while on a ruled form the values usually come from
+    the inline reader, and the two describe the same field in different words. Overlap is a
+    statement about the same place on the page, which survives that disagreement. It is a
+    one-to-one matching, or a value straddling two regions is printed in both.
+
+    *Name* second, for the fields position could not settle and for registry-backed
+    templates, whose ids are canonical rather than derived.
     """
     values: dict[str, Any] = {}
-    for field in analysis.detected_fields:
-        if field.normalized_value in (None, ""):
+    filled = [f for f in analysis.detected_fields if f.normalized_value not in (None, "")]
+    claimed: set[int] = set()
+
+    if template is not None:
+        slots = template.pages[page_index].fields
+        pairs = sorted(
+            (
+                (_overlap(slot.bbox, field.answer_bbox), i, j)
+                for i, slot in enumerate(slots)
+                for j, field in enumerate(filled)
+            ),
+            reverse=True,
+        )
+        taken: set[int] = set()
+        for score, i, j in pairs:
+            if score < MIN_SLOT_OVERLAP:
+                break
+            if i in taken or j in claimed:
+                continue
+            values[slots[i].field_id] = filled[j].normalized_value
+            taken.add(i)
+            claimed.add(j)
+
+    for j, field in enumerate(filled):
+        if j in claimed:
             continue
         values.setdefault(label_key(field.label_text), field.normalized_value)
         if field.canonical_key:
-            values[field.canonical_key] = field.normalized_value
+            values.setdefault(field.canonical_key, field.normalized_value)
     return values
+
+
+# A value must sit substantially inside the slot it fills; a value merely adjacent to one
+# belongs to the neighbouring field.
+MIN_SLOT_OVERLAP = 0.35
+
+
+def _overlap(slot, answer) -> float:
+    """Share of ``answer`` lying inside ``slot``. Both are page fractions."""
+    wide = max(0.0, min(slot.x + slot.width, answer.x + answer.width) - max(slot.x, answer.x))
+    tall = max(0.0, min(slot.y + slot.height, answer.y + answer.height) - max(slot.y, answer.y))
+    area = answer.width * answer.height
+    return (wide * tall) / area if area > 0 else 0.0
 
 
 def stored_values_path(folder: Path) -> Path:

@@ -198,7 +198,7 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
         raise HTTPException(404, f"Unknown template {chosen}") from exc
 
     try:
-        pdf = regenerate(template, values_from_analysis(analysis))
+        pdf = regenerate(template, values_from_analysis(analysis, template))
     except FileNotFoundError as exc:
         raise HTTPException(422, str(exc)) from exc
 
