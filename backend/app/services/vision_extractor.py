@@ -30,19 +30,22 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_OLLAMA_MODEL = "qwen2.5vl:7b"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 
-PROMPT = """You are reading a form. List EVERY field on it.
+PROMPT = """You are reading a form. List every field that HAS BEEN ANSWERED.
 
-A field is any printed caption with somewhere to answer — a box, a ruled line, a blank
-space, or a checkbox. Report the field whether or not anyone has answered it.
+A field is a printed caption with somewhere to answer — a box, a ruled line, a blank
+space, or a checkbox.
 
-For each field return:
+For each ANSWERED field return:
 - "label": the printed caption exactly as it appears
-- "value": what a person wrote or typed there. Use null if the field is empty.
+- "value": what a person wrote or typed there
 - "handwritten": true if the value is handwritten rather than printed
 
 Rules:
-- BLANK FORMS STILL HAVE FIELDS. If nothing is filled in, return every field with a
-  null value. Never return an empty list just because the form is unfilled.
+- REPORT EVERY ANSWERED FIELD. Work down the whole page and do not stop early: a form
+  with twelve answers must return twelve. Missing one is the worst thing you can do.
+- Skip a field only when its answer space is genuinely blank. The caller already knows
+  where the empty fields are, so listing them is wasted effort — but when in doubt about
+  whether something was filled in, report it.
 - TABLE CELLS ARE FIELDS. Many forms lay their fields out in a grid or table. A cell
   with a caption is a field, and each cell in a row is a SEPARATE field. Never merge
   several captions into one.
@@ -53,6 +56,8 @@ Rules:
 - Transcribe values exactly. Do not correct spelling or reformat.
 - Join a multi-line value's lines with \\n.
 - If you cannot read a value, use null rather than guessing.
+- Only return an empty list if the page is completely unfilled. If you can see even one
+  answer, the list must not be empty.
 
 Respond with JSON only: {"fields": [{"label": ..., "value": ..., "handwritten": ...}]}"""
 
