@@ -7,3 +7,9 @@ table.stored a{color:#164d7a;font-weight:600;text-decoration:none}
 table.stored a:hover{text-decoration:underline}
 .badge{display:inline-block;padding:1px 9px;border-radius:11px;background:#e6f4ec;color:#17623e;font-size:.8rem}
 .badge.low{background:#fdf0e0;color:#a65200}
+
+/* Page switcher for a multi-page upload: the current page reads as pressed, and each
+   button carries how many fields were read there so an empty page is obvious. */
+.toolbar.pages{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:0}
+.toolbar.pages button:disabled{opacity:1;font-weight:600;outline:2px solid currentColor}
+.toolbar.pages small{opacity:.7;font-weight:400}
