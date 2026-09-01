@@ -66,7 +66,33 @@ def words_from_image(image_path: Path, language: str) -> list[Word]:
                 confidence / 100,
             )
         )
-    return _drop_rule_artifacts(words)
+    return _drop_rule_artifacts(_split_glued_labels(words))
+
+
+def _split_glued_labels(words: list[Word]) -> list[Word]:
+    """Separate a label from its value when OCR returns them as one token.
+
+    A value written onto a ruled line often touches the rule and the label's colon, and
+    Tesseract then reads "Email:_daniel@example.com" as a single word. Neither the colon
+    pass nor the box pass can recover a value from that, because both work on whole words,
+    so the field reads as blank on a form that plainly has an answer on it.
+
+    The split point is the first colon, and the box is divided in proportion to the
+    character counts -- close enough for binding, since the two halves stay on one line.
+    Leading rule characters are dropped from the value.
+    """
+    out: list[Word] = []
+    for word in words:
+        head, sep, tail = word.text.partition(":")
+        value = tail.strip("_ .")
+        if not sep or not head.strip() or not value:
+            out.append(word)
+            continue
+        share = (len(head) + 1) / len(word.text)
+        cut = word.x0 + (word.x1 - word.x0) * share
+        out.append(word._replace(x1=cut, text=f"{head}:"))
+        out.append(word._replace(x0=cut, text=value))
+    return out
 
 
 # A rule line read as a glyph is short text with a shape no real character has: a box
@@ -137,7 +163,7 @@ def label_run_start(line: list[Word], lower: int, colon: int) -> int:
     return start
 
 
-def group_lines_tolerant(words: list[Word]) -> list[list[Word]]:
+def group_lines_tolerant(words: list[Word], tolerance_ratio: float = 0.8) -> list[list[Word]]:
     """Line grouping for OCR words, whose baselines jitter by a few pixels.
 
     Words join a line when their vertical centre sits within ~60% of the median word
@@ -152,7 +178,7 @@ def group_lines_tolerant(words: list[Word]) -> list[list[Word]]:
     heights = sorted(w.y1 - w.y0 for w in words)
     median_height = heights[len(heights) // 2]
     # Swept against FUNSD: tighter fragments long labels, looser merges adjacent rows.
-    tolerance = max(1.0, median_height * 0.8)
+    tolerance = max(1.0, median_height * tolerance_ratio)
 
     rows: list[list[Word]] = []
     centre_of: list[float] = []
