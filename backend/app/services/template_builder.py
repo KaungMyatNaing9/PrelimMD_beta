@@ -26,6 +26,7 @@ from app.schemas.models import (
     TemplateField,
     TemplatePage,
 )
+from app.services.form_analyzer import geometric_fields
 from app.services.regeneration import label_key
 from app.services.templates import DERIVED_ROOT, registry
 
@@ -98,11 +99,14 @@ def derive_template(
     Only fields the analyser located as boxes are usable: an inline "label: value" match
     describes where the text happened to sit, not where the form provides space for it.
     """
-    boxed = [f for f in analysis.detected_fields if f.source == "ocr_layout"]
+    # Always the geometric view, never the analysis's own fields: on a ruled form the
+    # inline reader usually wins, and its answer boxes describe where one patient's text
+    # landed rather than where the form provides space.
+    boxed = geometric_fields(page_image)
     if not boxed:
         raise ValueError(
-            "No input boxes were detected on this form, so a template cannot be derived "
-            "from it. Box-drawn forms are supported; free-position layouts are not yet."
+            "No answer regions were detected on this form, so a template cannot be "
+            "derived from it. The page may be too low-contrast for its rules to be found."
         )
 
     image = cv2.imread(str(page_image))
