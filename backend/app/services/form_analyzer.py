@@ -13,16 +13,13 @@ from app.services.canonical_registry import match, norm
 from app.services.field_layout import (
     MARKED_INK_RATIO,
     Box,
-    captions_below,
     captions_for_row,
-    clusters,
     detect_boxes,
     detect_checkboxes,
     detect_write_rules,
     ink_ratio,
     label_for_box,
     partition,
-    split_by_captions,
 )
 from app.services.templates import MATCH_THRESHOLD, registry
 from app.services.word_source import (
@@ -307,32 +304,9 @@ def _best_layout(
     rule_indices = set(range(len(boxes), len(boxes) + len(rules)))
     boxes += rules
     contents, free = partition(boxes, words)
-    # A row with a label to its left is one field: "Full Legal Name: Okafor Amara C" is a
-    # name, not three. A row with nothing to its left is named by the captions printed
-    # under it instead -- a city/state/zip line -- and each caption heads its own column.
-    forced: dict[int, list[Word]] = {}
-    candidates = group_lines_tolerant(free)
-    for i in list(rule_indices):
-        if label_for_box(boxes[i], candidates, left_only=True):
-            continue
-        captions = captions_below(boxes[i], words)
-        # Only a row that actually holds several values is worth splitting. Without this
-        # any run of plain words beneath a region -- a row of checkbox options, say --
-        # looks like a caption series and cuts a single answer into pieces.
-        if len(captions) < 2 or len(clusters(contents[i])) < 2:
-            continue
-        pieces = split_by_captions(boxes[i], captions, contents[i])
-        boxes[i] = pieces[0]
-        forced[i] = captions[0]
-        for piece, caption in zip(pieces[1:], captions[1:]):
-            forced[len(boxes)] = caption
-            rule_indices.add(len(boxes))
-            boxes.append(piece)
-    if forced:
-        contents, free = partition(boxes, words)
     gray = cv2.imread(str(page_image), cv2.IMREAD_GRAYSCALE)
     boxed, _ = _build_box_fields(
-        boxes, contents, group_lines_tolerant(free), w, h, gray, rule_indices, forced
+        boxes, contents, group_lines_tolerant(free), w, h, gray, rule_indices
     )
 
     def reads(candidate: list[DetectedFormField]) -> tuple[int, int]:
@@ -392,7 +366,6 @@ def _build_box_fields(
     h: float,
     gray=None,
     rule_indices: set[int] | None = None,
-    forced_labels: dict[int, list[Word]] | None = None,
 ) -> tuple[list[DetectedFormField], set[int]]:
     """Bind each detected input box to its nearest label; the value is what OCR read
     inside the box. Returns the fields plus the ids of lines consumed as labels, so the
@@ -403,9 +376,7 @@ def _build_box_fields(
     for i, (bx, value_words) in enumerate(zip(boxes, contents)):
         # On a ruled field the caption is always to the left; text above the rule is
         # the previous field's sub-caption ("Last", "STREET") and must not be taken.
-        label_words = (forced_labels or {}).get(i) or label_for_box(
-            bx, candidates, left_only=i in rule_indices
-        )
+        label_words = label_for_box(bx, candidates, left_only=i in rule_indices)
         if not label_words:
             continue
         used.add(id(label_words))
