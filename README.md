@@ -1,59 +1,104 @@
 # PrelimMD
 
-PrelimMD is a synthetic-data research prototype for turning intake forms into structured, reviewable information. Upload a PDF, scan, or image; PrelimMD preserves the page, detects available form fields, extracts existing answers, flags uncertain results, and shows a visual overlay for human review.
+PrelimMD turns a filled-in intake form into structured, reviewable information. Upload a
+PDF, scan or photograph of a form; it detects the fields, reads the answers, flags the ones
+it is unsure of, shows them overlaid on the page for a human to correct, and can refill a
+blank copy of the same form from what it read.
 
-It is not a clinical system, EHR integration, diagnosis tool, patient portal, or HIPAA-compliant service. Never upload real patient or sensitive personal data.
+It is a research prototype: not a clinical system, not an EHR integration, not a diagnosis
+tool, and not HIPAA-compliant. **Never upload real patient data.**
 
-## What is implemented
+## What works today
 
-- FastAPI backend and Next.js review UI.
-- JPG, PNG, and PDF validation with safe local artifacts.
-- PDF digital-text form analysis for the synthetic Robert fixture.
-- PDF word coordinates, label/value detection for colon-delimited rows, normalized coordinates, extracted values, canonical mappings, confidence, and review flags.
-- Complete-page PNG and SVG overlay endpoints.
-- Editable form-analysis corrections that persist in the active analysis.
-- Legacy template-aware `/api/v1/capture` path retained for compatibility.
-- Synthetic corpus: 3 layouts, 24 development, 6 validation, and 6 held-out test samples.
+- **PDFs, JPGs and PNGs**, through one shared understanding pipeline. The file format
+  decides only where the words come from — a PDF's text layer or OCR over the page.
+- **Multi-page PDFs.** Every page is read and each is reviewable; insurance sections
+  usually live on page 2.
+- **Two ways of reading a page**, scored against each other: fields drawn as boxes or ruled
+  lines, and `label: value` on one row.
+- **Tick boxes.** Marital status, Yes/No consents and similar are read as a *choice*, by
+  measuring ink in the box rather than by reading text, so an untouched group correctly
+  reads as unanswered.
+- **Per-field confidence**, with low-confidence fields flagged for review rather than
+  presented as fact.
+- **Template learning.** Given a filled form no registered template matches, it derives a
+  blank master and field coordinates from the upload itself.
+- **Regeneration.** Stored values are drawn back onto a blank template, positioned from the
+  template's own coordinates rather than from the upload, so output fidelity does not
+  depend on capture quality.
+- **An optional local vision model** (`qwen2.5-VL` via Ollama), off by default. Nothing
+  leaves the machine.
 
-Current limitation: generic scan/image OCR and general-purpose unknown-layout detection are still in progress. The bounded digital-PDF workflow is the current demonstration path.
+Read [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) before relying on any of it.
+The short version: real scans are largely unread, values can bind to the wrong label, and
+handwriting is not supported.
 
-## Run locally
+## Run it
 
-Requirements: Python 3.12, Node.js 20+, and optionally Docker Desktop for PostgreSQL. 
+Requires Python 3.12, Node 20+, and two system binaries:
 
 ```bash
-cd /Users/kaungmyatnaing/GitRepo/PrelimMD_beta
+brew install tesseract poppler     # OCR, and PDF rasterisation
+```
+
+```bash
 cp .env.example .env
 make backend-install
 make frontend-install
-make corpus
 ```
 
-Start the backend in one terminal:
+Backend, in one terminal:
 
 ```bash
 cd backend
-../.venv312/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8002
+../.venv312/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Start the frontend in a second terminal:
+Frontend, in a second:
 
 ```bash
 cd frontend
-NEXT_PUBLIC_API_URL=http://localhost:8002 npm run dev -- --hostname 127.0.0.1 --port 3002
+npm run dev -- --hostname 127.0.0.1 --port 3000
 ```
 
-Open:
+Then open <http://localhost:3000/capture> and upload a form. The API is at
+<http://localhost:8000/docs>.
 
-- App: http://localhost:3002/capture
-- API health: http://localhost:8002/api/v1/health
-- API docs: http://localhost:8002/docs
-
-Upload the synthetic digital-PDF fixture:
+A form to try, included in the repository:
 
 ```text
 backend/tests/fixtures/test_partial_form_robert.pdf
 ```
+
+Real clinic forms are deliberately **not** committed — see the data policy below.
+
+## Reviewing what it read
+
+The review screen shows the page with each detected answer boxed, and the values beside it.
+Fields it read come first in reading order; empty ones collapse behind a disclosure. A
+multi-page upload gets one button per page, each showing how many fields were read there.
+Corrections are saved against the analysis.
+
+If a template matched, **Regenerate filled PDF** draws the values back onto a blank copy.
+If none matched, **Learn template from this form** derives one from the upload.
+
+## Measuring it
+
+Accuracy is reported from real clinic forms, never from the synthetic corpus — the corpus
+is a regression check only, and reads far higher than reality. See
+[docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) for why, and for the caveats that
+belong with every figure.
+
+```bash
+python scripts/evaluate_real_forms.py                       # real forms
+python scripts/evaluate_real_forms.py --truth ground_truth_heldout2.json
+python scripts/evaluate_scans.py                            # real scans, and flagging
+python scripts/evaluate_roundtrip.py                        # read, learn, refill, read back
+python scripts/evaluate_placement.py                        # regeneration accuracy, in mm
+python scripts/evaluate_vision.py                           # vision model, needs Ollama
+```
+
+These need the benchmark forms, which are not in the repository.
 
 ## Checks
 
@@ -61,22 +106,25 @@ backend/tests/fixtures/test_partial_form_robert.pdf
 make test
 make lint
 make typecheck
-python scripts/verify_manifest.py
 SMOKE_PORT=8011 make smoke
-```
-
-Docker currently starts PostgreSQL only:
-
-```bash
-docker compose up -d postgres
-docker compose logs -f postgres
-docker compose down
 ```
 
 ## Project layout
 
-- `backend/` — API, schemas, preprocessing, form analysis, tests.
+- `backend/app/services/` — the pipeline: `word_source` (words from any format),
+  `field_layout` (boxes, rules, tick boxes), `form_analyzer` (understanding),
+  `template_builder`, `regeneration`.
 - `frontend/` — upload and review application.
-- `data/corpus/` — deterministic synthetic corpus and labels.
-- `backend/tests/fixtures/` — regression PDFs, including the Robert digital form.
-- `docs/` — architecture, API, progress, and demo notes.
+- `scripts/` — the measurement harnesses listed above.
+- `docs/` — architecture, API, licensing, known limitations.
+
+## Licensing
+
+The project ships under Apache 2.0. **One dependency currently conflicts with that**:
+PyMuPDF is AGPL-3.0. See [docs/LICENSING.md](docs/LICENSING.md) for the costed options.
+
+## Data policy
+
+Synthetic or public data only. No real patient information, ever. The forms used for
+measurement are blank documents published on clinics' own websites, filled with invented
+values, and are gitignored rather than committed.
