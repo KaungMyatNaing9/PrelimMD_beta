@@ -1,6 +1,7 @@
 import hashlib
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import cv2
 import fitz
@@ -12,7 +13,9 @@ from app.services.canonical_registry import match, norm
 from app.services.field_layout import (
     MARKED_INK_RATIO,
     Box,
+    captions_for_row,
     detect_boxes,
+    detect_checkboxes,
     detect_write_rules,
     ink_ratio,
     label_for_box,
@@ -21,7 +24,6 @@ from app.services.field_layout import (
 from app.services.templates import MATCH_THRESHOLD, registry
 from app.services.word_source import (
     Word,
-    group_lines_exact,
     group_lines_tolerant,
     label_run_start,
     words_from_image,
@@ -36,14 +38,6 @@ HEADINGS = {
     "insurance information",
     "medical history",
     "consent",
-    # Section titles standard across intake forms. A frame drawn around a section
-    # captures its title, which would otherwise be reported as a patient's answer.
-    "patient demographic information",
-    "patient information",
-    "primary insurance",
-    "secondary insurance",
-    "workers compensationauto",  # norm() drops the slash
-    "responsible party",
 }
 
 
@@ -200,24 +194,168 @@ def _fields_with_lines(
     return fields
 
 
+# The PDF page is rendered at twice its point size so thin rule lines survive for
+# morphological detection.
+PDF_RENDER_SCALE = 2
+
 MARK_TYPES = (FieldType.CHECKBOX, FieldType.SIGNATURE_PRESENCE)
 
-# Captions a section frame encloses. A patient's answer does not carry a label's colon,
-# and a run of several title-case words with no digits is a caption row, not a value.
-CAPTION_WORDS = 3
+
+# Two or more tick boxes sharing a field's answer space make it a choice, not free text.
+MIN_CHOICE_OPTIONS = 2
+# How far above its row's typical ink a box must sit to count as ticked.
+MARK_CONTRAST = 3.0
+
+
+def _resolve_choice_fields(
+    fields: list[DetectedFormField],
+    checkboxes: list[Box],
+    words: list[Word],
+    gray,
+    w: float,
+    h: float,
+) -> None:
+    """Report which option a tick-box field selects, instead of its row of printed text.
+
+    "Marital Status: Single [ ] Married [ ] Widowed [ ]" is a choice, and OCR reading of
+    the row ("Singleo Marriedo Widowedo") is neither the question nor the answer. The boxes
+    inside the field's answer space are measured for ink and the selected captions are
+    reported, so an unticked group reads empty rather than reading as prose.
+    """
+    if gray is None:
+        return
+    claimed: set[Box] = set()
+    # A tick box belongs to exactly one question. Where answer regions overlap, the
+    # tightest one owns the row, so a wide neighbouring field cannot claim it too.
+    for field in sorted(fields, key=lambda f: f.answer_bbox.width * f.answer_bbox.height):
+        bbox = field.answer_bbox
+        region = Box(bbox.x * w, bbox.y * h, (bbox.x + bbox.width) * w, (bbox.y + bbox.height) * h)
+        inside = sorted(
+            (b for b in checkboxes if b not in claimed and _centre_inside_box(b, region)),
+            key=lambda b: b.x0,
+        )
+        if len(inside) < MIN_CHOICE_OPTIONS:
+            continue
+        names = captions_for_row(inside, words, checkboxes)
+        if names is None:
+            continue
+        # A choice field's answer is the row of options itself. Where the region also
+        # holds text on a *different* line, that text is a written answer and the boxes
+        # belong to a neighbouring question whose region merely overlaps this one.
+        top = min(b.y0 for b in inside)
+        bottom = max(b.y1 for b in inside) + max(b.height for b in inside) * 2
+        if any(
+            _centre_inside_box(Box(word.x0, word.y0, word.x1, word.y1), region)
+            and not top <= (word.y0 + word.y1) / 2 <= bottom
+            and len([c for c in word.text if c.isalnum()]) >= 2
+            for word in words
+        ):
+            continue
+        claimed.update(inside)
+        captions = [(b, word.text) for b, word in zip(inside, names)]
+        # Whether a box is ticked is judged against its own row, not an absolute amount
+        # of ink. Scan darkness, box size and line weight vary between forms, but within
+        # one option row they are constant, so a mark is what stands out from its
+        # siblings. An untouched row is uniform and correctly reports nothing selected.
+        inks = [ink_ratio(gray, b) for b, _ in captions]
+        baseline = sorted(inks)[len(inks) // 2]
+        floor = max(MARKED_INK_RATIO, baseline * MARK_CONTRAST)
+        # Captions arrive with whatever spacing the form used to separate the option from
+        # its box, including the em spaces PDF text layers often carry.
+        chosen = [c.strip() for (b, c), ink in zip(captions, inks) if ink > floor]
+        field.field_type = FieldType.MULTIPLE_CHOICE
+        field.raw_value = ", ".join(chosen) or None
+        field.normalized_value = field.raw_value
+        field.is_blank = not chosen
+        field.confidence = 0.9 if chosen else 0.6
+        field.needs_review = not chosen
+
+
+def _centre_inside_box(inner: Box, outer: Box) -> bool:
+    cx, cy = (inner.x0 + inner.x1) / 2, (inner.y0 + inner.y1) / 2
+    return outer.x0 <= cx <= outer.x1 and outer.y0 <= cy <= outer.y1
+
+
+def _best_layout(
+    words: list[Word], page_image: Path, w: float, h: float, source: str
+) -> tuple[list[DetectedFormField], str, int]:
+    """Read a page under both layout strategies and keep whichever reads it better.
+
+    A form is either boxed (label above or left of a drawn region) or inline
+    ("label: value" on one row). Running both and merging makes the two compete for the
+    same labels, so each is scored whole and the better one wins outright.
+
+    Shared by the PDF and image paths. A ruled PDF form has its values on a different
+    baseline from their labels, so the colon pass alone reads nothing from it -- the
+    geometry has to come from the rendered page even when the text does not.
+    """
+    # PDF baselines are exact within one run of text, but a value typed onto a form sits a
+    # little off the baseline of the label beside it, and exact grouping never joins the
+    # two -- a value line carrying no colon is then discarded. Two of three held-out forms
+    # read *nothing* as PDFs while reading 62% and 25% as images. The same tolerance serves
+    # both paths; swept separately, the PDF optimum landed on the OCR value anyway.
+    grouped = group_lines_tolerant(words)
+    inline = [f for _, f in _fields_with_lines(grouped, w, h, source)]
+    if not page_image.exists():
+        return inline, "inline", 0
+
+    boxes = detect_boxes(page_image)
+    rules = detect_write_rules(page_image, boxes)
+    rule_indices = set(range(len(boxes), len(boxes) + len(rules)))
+    boxes += rules
+    contents, free = partition(boxes, words)
+    gray = cv2.imread(str(page_image), cv2.IMREAD_GRAYSCALE)
+    boxed, _ = _build_box_fields(
+        boxes, contents, group_lines_tolerant(free), w, h, gray, rule_indices
+    )
+
+    def reads(candidate: list[DetectedFormField]) -> tuple[int, int]:
+        return sum(1 for f in candidate if f.canonical_key), len(candidate)
+
+    fields = max((boxed, inline), key=reads)
+    _resolve_choice_fields(
+        fields, detect_checkboxes(page_image, words), words, gray, w, h
+    )
+    return fields, ("boxed" if fields is boxed else "inline"), len(boxes)
+
+# A printed title is centred inside the band that encloses it; a written answer starts
+# hard against the left of its region and leaves the rest of the rule empty. Measured on
+# real intake forms, a title's side margins agree within a quarter of the region width.
+CENTRED_SIDE_MARGIN = 0.15
+CENTRED_SYMMETRY = 0.25
+# A section title spans its section. A field region narrower than this is an answer space,
+# where a short value ("04 / 17 / 1986") can sit centred by coincidence.
+SECTION_BAND_WIDTH = 0.30
+# No single answer covers this much of a page. A region that large is a section frame, and
+# what it caught is the printed text of the fields inside it. The same fraction guards
+# template derivation in ``template_builder``.
+MAX_ANSWER_AREA_FRACTION = 0.12
+
+
+def _is_centred(box: Box, words: list[Word], page_width: float) -> bool:
+    """True when text sits centred in its region rather than left-aligned in it.
+
+    This is how a section frame's own title is told apart from a patient's answer without
+    knowing what any particular clinic calls its sections. Naming the titles instead
+    ("Primary Insurance", "Workers Compensation/Auto") only ever works on forms already
+    seen, which is the opposite of what this pipeline needs.
+    """
+    if not words or box.width <= 0 or box.width < page_width * SECTION_BAND_WIDTH:
+        return False
+    left = min(z.x0 for z in words) - box.x0
+    right = box.x1 - max(z.x1 for z in words)
+    return (
+        min(left, right) > box.width * CENTRED_SIDE_MARGIN
+        and abs(left - right) < box.width * CENTRED_SYMMETRY
+    )
 
 
 def _is_printed_caption(answer: str | None) -> bool:
+    """A run of text that is the form's own printing rather than an answer."""
     if not answer:
         return False
-    # "Secondary Insurance (If applicable)" is the same title as "Secondary Insurance".
-    bare = norm(answer.split("(")[0])
-    if ":" in answer or bare in HEADINGS:
-        return True
-    words = answer.split()
-    return len(words) >= CAPTION_WORDS and all(
-        z[:1].isupper() and z.isalpha() for z in words
-    )
+    # A label carries its colon into the value only when the region caught printed text.
+    return ":" in answer or norm(answer.split("(")[0]) in HEADINGS
 
 
 def _build_box_fields(
@@ -260,7 +398,8 @@ def _build_box_fields(
             )
             if is_blank_marker(answer):
                 answer = None
-            if _is_printed_caption(answer):
+            frame = bx.width * bx.height > w * h * MAX_ANSWER_AREA_FRACTION
+            if frame or _is_printed_caption(answer) or _is_centred(bx, value_words, w):
                 # A section frame ("Primary Insurance") encloses the captions of the
                 # fields inside it, so binding it as an answer reports the form's own
                 # printed text as a patient value. Blank it rather than drop the field:
@@ -299,139 +438,179 @@ def _build_box_fields(
     return fields, used
 
 
+class SourcePage(NamedTuple):
+    """A page reduced to what form understanding actually needs.
+
+    Everything downstream -- line grouping, box and rule detection, label binding, tick
+    boxes -- works from words plus a rendered page, and neither cares how they were
+    obtained. Keeping the formats apart any further than this duplicates the understanding
+    logic once per format, which is how the PDF path silently ended up with no geometric
+    detection at all and read nothing from ruled forms.
+    """
+
+    words: list[Word]
+    image: Path
+    width: float
+    height: float
+    source: str  # "pdf_text" or "ocr": exact text, or text with a confidence
+    source_type: str
+    fingerprint: str
+    stats: dict
+    warnings: list[str]
+
+
+def _read_pdf(folder: Path, pdf: Path) -> SourcePage:
+    """Words from the PDF text layer, with the page rendered so rules can be detected.
+
+    Text coordinates are scaled into the rendered page's pixel space; both are divided by
+    the same page size later, so the normalised boxes the API returns are unaffected.
+    """
+    page = fitz.open(pdf)[0]
+    image = folder / "normalized_color.png"
+    page.get_pixmap(
+        matrix=fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE), alpha=False
+    ).save(image)
+    words = words_from_pdf(page)
+    scaled = [
+        word._replace(
+            x0=word.x0 * PDF_RENDER_SCALE,
+            y0=word.y0 * PDF_RENDER_SCALE,
+            x1=word.x1 * PDF_RENDER_SCALE,
+            y1=word.y1 * PDF_RENDER_SCALE,
+        )
+        for word in words
+    ]
+    return SourcePage(
+        words=scaled,
+        image=image,
+        width=page.rect.width * PDF_RENDER_SCALE,
+        height=page.rect.height * PDF_RENDER_SCALE,
+        source="pdf_text",
+        source_type="digital_flat_pdf",
+        fingerprint=hashlib.sha256(pdf.read_bytes()).hexdigest(),
+        stats={"pdf_word_count": len(words)},
+        warnings=[] if words else ["This PDF carries no text layer; no fields were read."],
+    )
+
+
+def _read_image(folder: Path) -> SourcePage | None:
+    """Words from OCR over the contrast-enhanced page, which shares its dimensions with
+    the colour page served to the review UI, so overlay boxes line up."""
+    from PIL import Image
+
+    image = folder / "ocr_gray.png"
+    if not image.exists():
+        image = folder / "normalized_color.png"
+    if not image.exists():
+        return None
+    words = words_from_image(image, settings.ocr_language)
+    width, height = Image.open(image).size
+    return SourcePage(
+        words=words,
+        image=image,
+        width=float(width),
+        height=float(height),
+        source="ocr",
+        source_type="scanned_image",
+        # Hashes the normalised page: raw photo bytes vary with capture noise.
+        fingerprint=hashlib.sha256(image.read_bytes()).hexdigest(),
+        stats={
+            "ocr_word_count": len(words),
+            "mean_ocr_confidence": round(_mean_confidence(words), 3),
+        },
+        warnings=[] if words else ["OCR read no text from this page; check image quality."],
+    )
+
+
 class FormAnalyzer:
     def analyze(
         self, analysis_id: str, folder: Path, template_hint: str | None = None
     ) -> FormAnalysis:
+        """Understand a form. The format decides only where the words come from."""
         started = time.monotonic()
         pdf = folder / "source.pdf"
-        if pdf.exists():
-            return self._analyze_pdf(analysis_id, folder, pdf, started)
-        return self._analyze_image(analysis_id, folder, started, template_hint)
-
-    def _analyze_pdf(
-        self, analysis_id: str, folder: Path, pdf: Path, started: float
-    ) -> FormAnalysis:
-        doc = fitz.open(pdf)
-        page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-        pix.save(folder / "normalized_color.png")
-        words = words_from_pdf(page)
-        w, h = page.rect.width, page.rect.height
-        fields = [f for _, f in _fields_with_lines(group_lines_exact(words), w, h, "pdf_text")]
-        return FormAnalysis(
-            analysis_id=analysis_id,
-            source_type="digital_flat_pdf",
-            pages=[
-                {
-                    "page_index": 0,
-                    "image_url": f"/api/v1/form-analyses/{analysis_id}/pages/0/image",
-                    "pdf_word_count": len(words),
-                    "width": w,
-                    "height": h,
-                }
-            ],
-            detected_fields=fields,
-            form_fingerprint=hashlib.sha256(pdf.read_bytes()).hexdigest(),
-            warnings=[],
-            processing_time_ms=int((time.monotonic() - started) * 1000),
-        )
-
-    def _analyze_image(
-        self,
-        analysis_id: str,
-        folder: Path,
-        started: float,
-        template_hint: str | None = None,
-    ) -> FormAnalysis:
-        """OCR a photo or scan. Coordinates come from the contrast-enhanced grayscale
-        page, which shares dimensions with the colour page served to the review UI."""
-        from PIL import Image
-
-        page_image = folder / "ocr_gray.png"
-        if not page_image.exists():
-            page_image = folder / "normalized_color.png"
-        if not page_image.exists():
+        page = _read_pdf(folder, pdf) if pdf.exists() else _read_image(folder)
+        if page is None:
             return FormAnalysis(
                 analysis_id=analysis_id,
                 source_type="scanned_image",
-                pages=[
-                    {
-                        "page_index": 0,
-                        "image_url": f"/api/v1/form-analyses/{analysis_id}/pages/0/image",
-                    }
-                ],
+                pages=[{"page_index": 0, "image_url": _image_url(analysis_id)}],
                 detected_fields=[],
                 form_fingerprint="image",
                 warnings=["Page image was not preprocessed; cannot run OCR."],
                 processing_time_ms=int((time.monotonic() - started) * 1000),
             )
 
-        words = words_from_image(page_image, settings.ocr_language)
-        w, h = Image.open(page_image).size
-
-        # Identify the blank master this page came from, so its values can later be
-        # regenerated onto the template's own exact field coordinates.
-        matched, match_score = None, 0.0
-        colour = cv2.imread(str(folder / "normalized_color.png"))
-        if colour is not None:
-            try:
-                definition, match_score = registry.match(colour, template_hint)
-                matched = (
-                    definition.template_id
-                    if definition and match_score >= MATCH_THRESHOLD
-                    else None
-                )
-            except RuntimeError:
-                matched = None
-
-        # A form is either boxed (label above or left of a drawn box) or inline
-        # ("label: value" on one row). Running both and merging makes the two compete
-        # for the same labels, so score each and keep whichever reads the page better.
-        # Closed boxes and ruled write-lines are both answer regions; corpus forms use
-        # the first, real intake forms mostly the second.
-        boxes = detect_boxes(page_image)
-        rules = detect_write_rules(page_image, boxes)
-        rule_indices = set(range(len(boxes), len(boxes) + len(rules)))
-        boxes += rules
-        contents, free = partition(boxes, words)
-        gray = cv2.imread(str(page_image), cv2.IMREAD_GRAYSCALE)
-        boxed, _ = _build_box_fields(
-            boxes, contents, group_lines_tolerant(free), w, h, gray, rule_indices
+        fields, layout, boxes_detected = _best_layout(
+            page.words, page.image, page.width, page.height, page.source
         )
-        inline = [f for _, f in _fields_with_lines(group_lines_tolerant(words), w, h, "ocr")]
+        matched, match_score = _match_template(folder, template_hint)
 
-        def reads(candidate: list[DetectedFormField]) -> tuple[int, int]:
-            return sum(1 for f in candidate if f.canonical_key), len(candidate)
-
-        fields = max((boxed, inline), key=reads)
-        layout = "boxed" if fields is boxed else "inline"
-
-        warnings = []
-        if not words:
-            warnings.append("OCR read no text from this page; check image quality.")
-        elif not fields:
-            warnings.append("OCR found no labelled boxes or 'label: value' lines.")
+        warnings = list(page.warnings)
+        if page.words and not fields:
+            warnings.append("No labelled boxes or 'label: value' lines were found.")
         return FormAnalysis(
             analysis_id=analysis_id,
-            source_type="scanned_image",
+            source_type=page.source_type,
             pages=[
                 {
                     "page_index": 0,
-                    "image_url": f"/api/v1/form-analyses/{analysis_id}/pages/0/image",
-                    "ocr_word_count": len(words),
-                    "mean_ocr_confidence": round(_mean_confidence(words), 3),
+                    "image_url": _image_url(analysis_id),
                     "layout": layout,
-                    "boxes_detected": len(boxes),
+                    "boxes_detected": boxes_detected,
                     "template_match_confidence": round(match_score, 3),
-                    "width": w,
-                    "height": h,
+                    "width": page.width,
+                    "height": page.height,
+                    **page.stats,
                 }
             ],
             detected_fields=fields,
-            # Hashes the normalized page: raw photo bytes vary with capture noise.
-            form_fingerprint=hashlib.sha256(page_image.read_bytes()).hexdigest(),
+            form_fingerprint=page.fingerprint,
             matched_known_template=matched,
             warnings=warnings,
             processing_time_ms=int((time.monotonic() - started) * 1000),
         )
+
+
+def geometric_fields(page_image: Path) -> list[DetectedFormField]:
+    """Every region the form provides for an answer, bound to its label.
+
+    A template describes *where a form gives you space to write*, which is the geometric
+    view of the page and nothing to do with which strategy happened to read the values
+    better. Most real intake forms are ruled rather than boxed, so the inline reader wins
+    on them and their fields carry ``source="ocr"`` -- deriving a template from those
+    would record where text happened to sit on one filled copy, not where the blank form
+    provides space, and regeneration would place values wherever that one patient wrote.
+    """
+    from PIL import Image
+
+    words = words_from_image(page_image, settings.ocr_language)
+    w, h = Image.open(page_image).size
+    boxes = detect_boxes(page_image)
+    rules = detect_write_rules(page_image, boxes)
+    rule_indices = set(range(len(boxes), len(boxes) + len(rules)))
+    boxes += rules
+    contents, free = partition(boxes, words)
+    gray = cv2.imread(str(page_image), cv2.IMREAD_GRAYSCALE)
+    fields, _ = _build_box_fields(
+        boxes, contents, group_lines_tolerant(free), float(w), float(h), gray, rule_indices
+    )
+    return fields
+
+
+def _image_url(analysis_id: str) -> str:
+    return f"/api/v1/form-analyses/{analysis_id}/pages/0/image"
+
+
+def _match_template(folder: Path, hint: str | None) -> tuple[str | None, float]:
+    """Identify the blank master this page came from, so its values can later be
+    regenerated onto the template's own exact field coordinates."""
+    colour = cv2.imread(str(folder / "normalized_color.png"))
+    if colour is None:
+        return None, 0.0
+    try:
+        definition, score = registry.match(colour, hint)
+    except RuntimeError:
+        return None, 0.0
+    matched = definition.template_id if definition and score >= MATCH_THRESHOLD else None
+    return matched, score
