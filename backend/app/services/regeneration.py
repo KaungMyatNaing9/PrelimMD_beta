@@ -31,6 +31,12 @@ def _text_for(value: Any, field_type: FieldType | str) -> str | None:
     return str(value)
 
 
+# Room left below the baseline, as a multiple of the point size. It has to clear the
+# glyph box the renderer reports rather than the nominal descent, or a value sits a
+# fraction of a point past the foot of its own field.
+DESCENDER = 0.35
+
+
 def _font_size(height_pt: float) -> float:
     """Fit the face to the field box, clamped to a legible range."""
     return max(6.0, min(12.0, height_pt * 0.55))
@@ -67,14 +73,30 @@ def regenerate(
             (box.x + box.width) * width,
             (box.y + box.height) * height,
         )
-        # Small inset keeps the fill clear of the printed rule line.
-        page.insert_textbox(
-            rect + (2, 1, -2, -1),
+        size = _font_size(rect.height)
+        if "\n" in text:
+            # A multi-line value needs the whole region and grows downwards from its top.
+            page.insert_textbox(
+                rect + (2, 1, -2, -1),
+                text,
+                fontsize=size,
+                fontname="helv",
+                color=(0.05, 0.05, 0.15),
+                align=fitz.TEXT_ALIGN_LEFT,
+            )
+            continue
+        # A person writes *on* the rule at the foot of the space, not floating at its top,
+        # but a text box lays its first line from the top edge. Filling the whole region
+        # therefore printed every value about 4.5mm high -- a constant offset, measured
+        # identically on every correctly placed field. Setting the baseline directly puts
+        # the value back on the rule. Shrinking the box instead silently renders nothing
+        # when the text no longer fits.
+        page.insert_text(
+            fitz.Point(rect.x0 + 2, rect.y1 - size * DESCENDER),
             text,
-            fontsize=_font_size(rect.height),
+            fontsize=size,
             fontname="helv",
             color=(0.05, 0.05, 0.15),
-            align=fitz.TEXT_ALIGN_LEFT,
         )
 
     return doc.tobytes()
