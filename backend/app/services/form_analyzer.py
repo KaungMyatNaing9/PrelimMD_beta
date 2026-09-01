@@ -459,14 +459,15 @@ class SourcePage(NamedTuple):
     warnings: list[str]
 
 
-def _read_pdf(folder: Path, pdf: Path) -> SourcePage:
+def _read_pdf(folder: Path, pdf: Path, index: int = 0) -> SourcePage:
     """Words from the PDF text layer, with the page rendered so rules can be detected.
 
     Text coordinates are scaled into the rendered page's pixel space; both are divided by
     the same page size later, so the normalised boxes the API returns are unaffected.
     """
-    page = fitz.open(pdf)[0]
-    image = folder / "normalized_color.png"
+    page = fitz.open(pdf)[index]
+    # Page 0 keeps the plain name so everything already pointing at it still works.
+    image = folder / ("normalized_color.png" if index == 0 else f"page_{index}.png")
     page.get_pixmap(
         matrix=fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE), alpha=False
     ).save(image)
@@ -529,7 +530,15 @@ class FormAnalyzer:
         """Understand a form. The format decides only where the words come from."""
         started = time.monotonic()
         pdf = folder / "source.pdf"
-        page = _read_pdf(folder, pdf) if pdf.exists() else _read_image(folder)
+        if pdf.exists():
+            # Insurance, medications and consent live on later pages of a real intake
+            # packet, so reading only the first threw away whole sections of the form.
+            count = min(len(fitz.open(pdf)), settings.max_pdf_pages)
+            sources = [_read_pdf(folder, pdf, index) for index in range(count)]
+        else:
+            first = _read_image(folder)
+            sources = [first] if first else []
+        page = sources[0] if sources else None
         if page is None:
             return FormAnalysis(
                 analysis_id=analysis_id,
@@ -541,29 +550,37 @@ class FormAnalyzer:
                 processing_time_ms=int((time.monotonic() - started) * 1000),
             )
 
-        fields, layout, boxes_detected = _best_layout(
-            page.words, page.image, page.width, page.height, page.source
-        )
         matched, match_score = _match_template(folder, template_hint)
-
+        fields: list[DetectedFormField] = []
+        pages = []
         warnings = list(page.warnings)
+        for index, source in enumerate(sources):
+            read, layout, boxes_detected = _best_layout(
+                source.words, source.image, source.width, source.height, source.source
+            )
+            # Field ids are only unique within the page that produced them.
+            for field in read:
+                field.page_index = index
+                field.field_id = f"p{index}_{field.field_id}" if index else field.field_id
+            fields += read
+            pages.append(
+                {
+                    "page_index": index,
+                    "image_url": _image_url(analysis_id, index),
+                    "layout": layout,
+                    "boxes_detected": boxes_detected,
+                    "template_match_confidence": round(match_score, 3),
+                    "width": source.width,
+                    "height": source.height,
+                    **source.stats,
+                }
+            )
         if page.words and not fields:
             warnings.append("No labelled boxes or 'label: value' lines were found.")
         return FormAnalysis(
             analysis_id=analysis_id,
             source_type=page.source_type,
-            pages=[
-                {
-                    "page_index": 0,
-                    "image_url": _image_url(analysis_id),
-                    "layout": layout,
-                    "boxes_detected": boxes_detected,
-                    "template_match_confidence": round(match_score, 3),
-                    "width": page.width,
-                    "height": page.height,
-                    **page.stats,
-                }
-            ],
+            pages=pages,
             detected_fields=fields,
             form_fingerprint=page.fingerprint,
             matched_known_template=matched,
@@ -598,8 +615,8 @@ def geometric_fields(page_image: Path) -> list[DetectedFormField]:
     return fields
 
 
-def _image_url(analysis_id: str) -> str:
-    return f"/api/v1/form-analyses/{analysis_id}/pages/0/image"
+def _image_url(analysis_id: str, index: int = 0) -> str:
+    return f"/api/v1/form-analyses/{analysis_id}/pages/{index}/image"
 
 
 def _match_template(folder: Path, hint: str | None) -> tuple[str | None, float]:
