@@ -91,7 +91,7 @@ def ink_ratio(gray: np.ndarray, box: Box) -> float:
 
 # A write-rule is long enough to hold an answer and thin enough not to be a box edge.
 MIN_RULE_WIDTH_FRACTION = 0.04
-WRITE_HEIGHT_FRACTION = 0.022
+WRITE_HEIGHT_FRACTION = 0.026
 
 
 def detect_write_rules(image_path: Path, boxes: list[Box]) -> list[Box]:
@@ -127,6 +127,127 @@ def detect_write_rules(image_path: Path, boxes: list[Box]) -> list[Box]:
         found.append(Box(float(x), float(max(0, y - write_height)), float(x + bw), float(y)))
 
     return [b for b in found if not any(_iou(b, k) > 0.5 for k in boxes)]
+
+
+# How much of its bounding rectangle a genuine box outline fills.
+BORDER_COVERAGE = 0.7
+
+
+# A tick box is square within tolerance and about the height of a line of text. Anything
+# squarer-but-larger is a framed section; anything smaller is scan speckle.
+CHECKBOX_ASPECT = 1.5
+CHECKBOX_MIN_SIDE = 0.006
+CHECKBOX_MAX_SIDE = 0.030
+
+
+def detect_checkboxes(image_path: Path, words: list[Word] | None = None) -> list[Box]:
+    """Find tick boxes, which ``detect_boxes`` deliberately discards.
+
+    That function drops anything under 2% of the page width, because a region that small
+    cannot hold a written answer. A tick box is about 1%, so it is always dropped there.
+
+    Detection is by polygon approximation rather than the morphological pass used for
+    answer regions: a tick box is a small convex quadrilateral, and asking for that shape
+    directly separates it from the letter strokes of the same size around it. Opening with
+    a kernel short enough to preserve a box that small also preserves glyph strokes, which
+    made a page of text read as hundreds of checkboxes.
+    """
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        return []
+    h, w = image.shape
+    small = min(w, h)
+    binary = cv2.adaptiveThreshold(
+        image, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10
+    )
+    found: list[Box] = []
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        approx = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            continue
+        x, y, bw, bh = cv2.boundingRect(approx)
+        if bw <= 0 or bh <= 0:
+            continue
+        aspect = max(bw / bh, bh / bw)
+        side = max(bw, bh) / small
+        if not (aspect <= CHECKBOX_ASPECT and CHECKBOX_MIN_SIDE <= side <= CHECKBOX_MAX_SIDE):
+            continue
+        # A drawn box traces a true rectangle; a glyph that happens to have four corners
+        # fills its bounding rect poorly.
+        if cv2.contourArea(approx) / (bw * bh) < BORDER_COVERAGE:
+            continue
+        found.append(Box(float(x), float(y), float(x + bw), float(y + bh)))
+
+    # The decisive test: a tick box is drawn in the form's rule ink, so it is not part of
+    # any word OCR read. A character that happens to approximate a quadrilateral -- the
+    # 0 and 4 in "1420" -- sits inside a recognised multi-character word, and dropping
+    # those needs no assumption about how a particular form spaces its options. A box that
+    # OCR mistook for a lone glyph keeps its place, since that reading is one character.
+    if words is not None:
+        text_runs = [w for w in words if len(_alphanumeric(w.text)) >= 2]
+        found = [
+            b
+            for b in found
+            if not any(_iou(b, Box(t.x0, t.y0, t.x1, t.y1)) > 0.3 for t in text_runs)
+        ]
+
+    # A drawn box yields an inner and an outer contour a pixel or two apart.
+    unique: list[Box] = []
+    for candidate in sorted(found, key=lambda b: b.width * b.height, reverse=True):
+        if not any(_iou(candidate, k) > 0.5 for k in unique):
+            unique.append(candidate)
+    return unique
+
+
+def _alphanumeric(text: str) -> str:
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def captions_for_row(
+    row: list[Box], words: list[Word], checkboxes: list[Box]
+) -> list[Word] | None:
+    """Name every box in one option row.
+
+    Forms disagree about which side the caption is printed on: "Single [ ] Married [ ]"
+    puts it left, "[ ] Male [ ] Female" right, and a row with its captions underneath puts
+    it below. Picking the nearest word per box gets the middle of a row wrong, because a
+    neighbouring option's caption is often nearer than the box's own.
+
+    Resolved as a matching instead: a word names at most one box, and the closest pairs are
+    settled first. That needs no decision about the form's convention -- with each word
+    spoken for, the only consistent reading is the correct one. Returns ``None`` if any box
+    goes unnamed.
+    """
+    reach = max(b.height for b in row) * 4
+    pairs = []
+    for i, box in enumerate(row):
+        for word in words:
+            if any(_centre_inside(word, other) for other in checkboxes):
+                continue
+            if _span(word.y0, word.y1, box.y0, box.y1) > 0:
+                if word.x0 >= box.x1:
+                    distance = word.x0 - box.x1
+                elif word.x1 <= box.x0:
+                    distance = box.x0 - word.x1
+                else:
+                    continue
+            elif 0 <= word.y0 - box.y1 <= reach and _span(word.x0, word.x1, box.x0, box.x1) > 0:
+                distance = word.y0 - box.y1
+            else:
+                continue
+            if distance <= reach:
+                pairs.append((distance, i, word))
+
+    names: dict[int, Word] = {}
+    taken: set[int] = set()
+    for _, i, word in sorted(pairs, key=lambda p: p[0]):
+        key = id(word)
+        if i in names or key in taken:
+            continue
+        names[i] = word
+        taken.add(key)
+    return [names[i] for i in range(len(row))] if len(names) == len(row) else None
 
 
 def _iou(a: Box, b: Box) -> float:
