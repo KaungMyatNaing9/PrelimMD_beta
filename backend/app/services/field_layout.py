@@ -250,6 +250,95 @@ def captions_for_row(
     return [names[i] for i in range(len(row))] if len(names) == len(row) else None
 
 
+# A caption sits within about this much of the region it describes, as a share of the
+# region's own height.
+CAPTION_REACH = 1.2
+
+
+def _is_caption(text: str) -> bool:
+    """Whether a word can be a sub-caption rather than a label or an answer.
+
+    The band beneath a row also contains the next row's label and sometimes its value, and
+    the three are told apart by what they are made of: a row label carries the colon that
+    introduces its answer, and an answer usually carries digits. A printed sub-caption --
+    "STREET", "CITY", "ZIP CODE", "Last", "First" -- has neither.
+    """
+    stripped = text.strip()
+    return (
+        any(c.isalpha() for c in stripped)
+        and ":" not in stripped
+        and not any(c.isdigit() for c in stripped)
+        # A ruled line OCRs as a run of underscores and carries no letters, but a form
+        # built from rules has one under every field, so this must be explicit.
+        and "_" not in stripped
+    )
+
+
+def captions_below(box: Box, words: list[Word]) -> list[list[Word]]:
+    """Sub-captions printed underneath an answer space, left to right.
+
+    A city/state/zip line carries no label of its own: the row is named by "CITY",
+    "STATE" and "ZIP CODE" printed beneath it. Those words are searched for among *all*
+    words rather than the free ones, because a caption row often falls inside the region
+    of the rule below it and would otherwise be invisible as a label.
+    """
+    reach = box.height * CAPTION_REACH
+    below = [
+        w
+        for w in words
+        if box.y1 <= w.y0 <= box.y1 + reach
+        and _span(w.x0, w.x1, box.x0, box.x1) > 0
+        and _is_caption(w.text)
+    ]
+    if not below:
+        return []
+    groups: list[list[Word]] = []
+    for word in sorted(below, key=lambda w: w.x0):
+        gap = word.x0 - groups[-1][-1].x1 if groups else None
+        if groups and gap is not None and gap < word.y1 - word.y0:
+            groups[-1].append(word)
+        else:
+            groups.append([word])
+    return groups
+
+
+def split_by_captions(
+    box: Box, captions: list[list[Word]], inside: list[Word] | None = None
+) -> list[Box]:
+    """Cut a region into one column per caption.
+
+    Captions are centred under their column while a written value is left-aligned in it,
+    so cutting between caption centres puts every boundary too far right and each value
+    lands one column to the left of its own caption. Where the region's own content falls
+    into as many clusters as there are captions, the gaps between those clusters are the
+    real boundaries and are used instead; the captions only supply the names.
+    """
+    groups = clusters(inside or [])
+    if len(groups) == len(captions):
+        edges = [box.x0]
+        edges += [
+            (max(w.x1 for w in groups[i]) + min(w.x0 for w in groups[i + 1])) / 2
+            for i in range(len(groups) - 1)
+        ]
+    else:
+        centres = [(min(w.x0 for w in c) + max(w.x1 for w in c)) / 2 for c in captions]
+        edges = [box.x0]
+        edges += [(centres[i] + centres[i + 1]) / 2 for i in range(len(centres) - 1)]
+    edges.append(box.x1)
+    return [Box(edges[i], box.y0, edges[i + 1], box.y1) for i in range(len(captions))]
+
+
+def clusters(words: list[Word]) -> list[list[Word]]:
+    """Group words left to right, breaking where the gap exceeds a word's own height."""
+    groups: list[list[Word]] = []
+    for word in sorted(words, key=lambda w: w.x0):
+        if groups and word.x0 - groups[-1][-1].x1 < word.y1 - word.y0:
+            groups[-1].append(word)
+        else:
+            groups.append([word])
+    return groups
+
+
 def _iou(a: Box, b: Box) -> float:
     overlap = _span(a.x0, a.x1, b.x0, b.x1) * _span(a.y0, a.y1, b.y0, b.y1)
     union = a.width * a.height + b.width * b.height - overlap
