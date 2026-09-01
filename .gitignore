@@ -32,3 +32,6 @@ idea.md
 # Real clinic forms downloaded for out-of-sample testing. Third-party documents —
 # local evaluation only, never committed.
 data/real-forms/
+
+# Private working plan, like idea.md
+plan.md
