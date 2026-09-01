@@ -37,7 +37,7 @@ def words_from_pdf(page) -> list[Word]:
 def words_from_image(image_path: Path, language: str) -> list[Word]:
     """Words from whichever OCR engine is configured."""
     if settings.ocr_engine == "rapidocr":
-        return _drop_rule_artifacts(_split_glued_labels(_words_from_rapidocr(image_path)))
+        return _drop_rule_artifacts(_strip_box_glyphs(_split_glued_labels(_words_from_rapidocr(image_path))))
     return _words_from_tesseract(image_path, language)
 
 
@@ -126,11 +126,41 @@ def _words_from_tesseract(image_path: Path, language: str) -> list[Word]:
                 confidence / 100,
             )
         )
-    return _drop_rule_artifacts(_split_glued_labels(words))
+    return _drop_rule_artifacts(_strip_box_glyphs(_split_glued_labels(words)))
 
 
 RULE_RUN = re.compile(r"(_{3,})")
 RULE_ONLY = re.compile(r"^_+$")
+# OCR reads an empty tick box as bracket-ish glyphs, and they arrive glued to the option
+# label beside it: "[_|Married", "[|Home", "[_]Decline".
+BOX_GLYPHS = "[]|{}_"
+
+
+def _strip_box_glyphs(words: list[Word]) -> list[Word]:
+    """Take the drawn tick box off the front of the option it labels.
+
+    The box is not text and never belongs in a value, but OCR cannot tell and hands it back
+    attached to whatever it sits beside. Left in, it turns a two-letter answer into
+    "[_|NC" and a caption into "[_]Decline". The box is measured properly elsewhere, by
+    ink coverage, so nothing is lost by removing it here.
+    """
+    out: list[Word] = []
+    for word in words:
+        cleaned = word.text.strip(BOX_GLYPHS)
+        if not cleaned:
+            continue  # the glyphs were the whole token: a box, not a word
+        if cleaned == word.text:
+            out.append(word)
+            continue
+        # Trim the box off the geometry too, in proportion, so the word still sits where
+        # its letters are rather than where the box began.
+        lead = len(word.text) - len(word.text.lstrip(BOX_GLYPHS))
+        span = word.x1 - word.x0
+        start = word.x0 + span * lead / len(word.text)
+        out.append(
+            word._replace(x0=start, x1=start + span * len(cleaned) / len(word.text), text=cleaned)
+        )
+    return out
 
 
 def _split_rules_from_text(words: list[Word]) -> list[Word]:
