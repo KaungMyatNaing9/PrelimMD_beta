@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from app.config import settings
+from app.schemas.form_understanding import FieldRevision
 from app.schemas.models import ExtractionSource
 from app.services.capture import new_run_dir, preprocess, save_upload
 from app.services.extraction import extract_run, read_run, write_run
@@ -32,6 +33,9 @@ app.add_middleware(
 class Correction(BaseModel):
     value: object
     reviewed: bool = True
+    # Who is replacing the value. Recorded against the reading being superseded, because
+    # "who last touched this field" is the question a chart review asks first.
+    corrected_by: str = "reviewer"
 
 
 def run_dir(run_id: str) -> Path:
@@ -144,6 +148,18 @@ def correct_analysis_field(analysis_id: str, field_id: str, correction: Correcti
     analysis = get_form_analysis(analysis_id)
     for field in analysis.detected_fields:
         if field.field_id == field_id:
+            # File what is being replaced before replacing it. A correction that silently
+            # overwrote the machine's reading would leave a chart review unable to tell an
+            # extraction error from a patient changing their mind.
+            field.history.append(
+                FieldRevision(
+                    value=field.normalized_value,
+                    source=field.source,
+                    confidence=field.confidence,
+                    superseded_at=datetime.now(UTC),
+                    superseded_by=correction.corrected_by,
+                )
+            )
             field.raw_value = correction.value
             field.normalized_value = correction.value
             field.is_blank = False

@@ -48,6 +48,24 @@ class CanonicalFieldDefinition(BaseModel):
     validator: str | None = None
 
 
+class FieldRevision(BaseModel):
+    """A value this field used to hold, and where that value came from.
+
+    The faculty review's rule: never silently overwrite a value a patient entered. A
+    correction therefore does not erase what was there -- it files it here first, with the
+    reading that produced it and how sure that reading was, so a later chart review can see
+    what the machine said before a person changed it.
+
+    Append-only. Entries are never edited or removed.
+    """
+
+    value: Any = None
+    source: str
+    confidence: float = Field(ge=0, le=1)
+    superseded_at: datetime
+    superseded_by: str
+
+
 class DetectedFormField(BaseModel):
     field_id: str
     page_index: int
@@ -69,6 +87,8 @@ class DetectedFormField(BaseModel):
     is_blank: bool = True
     confidence: float = Field(default=0, ge=0, le=1)
     needs_review: bool = False
+    # Oldest first. Empty until something replaces the extracted value.
+    history: list[FieldRevision] = Field(default_factory=list)
 
 
 class AnswerCandidate(BaseModel):
