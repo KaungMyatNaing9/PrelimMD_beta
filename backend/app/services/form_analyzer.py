@@ -22,7 +22,10 @@ from app.services.field_layout import (
     partition,
 )
 from app.services.field_validity import plausible
+from app.services.fusion import fuse
 from app.services.templates import MATCH_THRESHOLD, registry
+from app.services.vision_extractor import available as vision_available
+from app.services.vision_extractor import extract as vision_extract
 from app.services.word_source import (
     Word,
     group_lines_tolerant,
@@ -573,6 +576,23 @@ class FormAnalyzer:
             for field in read:
                 field.page_index = index
                 field.field_id = f"p{index}_{field.field_id}" if index else field.field_id
+            # Optional second reader. Off unless a vision provider is configured, so the
+            # shipped behaviour is unchanged and turning it off is one environment
+            # variable rather than a revert.
+            if vision_available():
+                try:
+                    read = fuse(
+                        read,
+                        vision_extract(source.image),
+                        source.words,
+                        source.width,
+                        source.height,
+                        index,
+                        detect_checkboxes(source.image, source.words),
+                    )
+                except Exception as exc:  # noqa: BLE001 - a second opinion must never
+                    # take the page down; the geometric reading stands on its own.
+                    warnings.append(f"Vision reading unavailable: {type(exc).__name__}")
             fields += read
             pages.append(
                 {
