@@ -11,6 +11,7 @@ from app.schemas.form_understanding import FieldRevision
 from app.schemas.models import ExtractionSource
 from app.services.capture import new_run_dir, preprocess, save_upload
 from app.services.extraction import extract_run, read_run, write_run
+from app.services.fhir import to_questionnaire_response
 from app.services.form_analyzer import FormAnalyzer
 from app.services.regeneration import regenerate, values_from_analysis
 from app.services.template_builder import derive_template
@@ -169,6 +170,15 @@ def correct_analysis_field(analysis_id: str, field_id: str, correction: Correcti
             (folder / "analysis.json").write_text(analysis.model_dump_json(indent=2))
             return field
     raise HTTPException(404, "Field not found")
+
+
+@app.get("/api/v1/form-analyses/{analysis_id}/fhir")
+def analysis_as_fhir(analysis_id: str, questionnaire: str | None = None,
+                     subject: str | None = None):
+    """The analysis as a FHIR QuestionnaireResponse, the shape other systems can read."""
+    return to_questionnaire_response(
+        get_form_analysis(analysis_id), questionnaire=questionnaire, subject=subject
+    )
 
 
 @app.post("/api/v1/form-analyses/{analysis_id}/derive-template", status_code=201)
