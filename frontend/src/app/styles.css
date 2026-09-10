@@ -13,3 +13,11 @@ table.stored a:hover{text-decoration:underline}
 .toolbar.pages{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:0}
 .toolbar.pages button:disabled{opacity:1;font-weight:600;outline:2px solid currentColor}
 .toolbar.pages small{opacity:.7;font-weight:400}
+
+/* What a field used to hold. Kept quiet: it matters during chart review, not while typing. */
+details.history{margin-top:.4rem;font-size:.85em}
+details.history summary{cursor:pointer;opacity:.65}
+details.history ol{margin:.3rem 0 0;padding-left:1.2rem}
+details.history li{margin:.15rem 0}
+details.history code{background:rgba(0,0,0,.06);padding:0 .25rem;border-radius:3px}
+details.history small{opacity:.7}
