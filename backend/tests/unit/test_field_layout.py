@@ -5,8 +5,15 @@ import pytest
 from PIL import Image, ImageDraw
 
 from app.schemas.models import FieldType
-from app.services.field_layout import Box, detect_boxes, ink_ratio, label_for_box, partition
-from app.services.form_analyzer import normalize
+from app.services.field_layout import (
+    Box,
+    detect_boxes,
+    detect_checkboxes,
+    ink_ratio,
+    label_for_box,
+    partition,
+)
+from app.services.form_analyzer import _cluster_option_rows, normalize
 from app.services.word_source import Word, group_lines_tolerant
 
 
@@ -106,3 +113,46 @@ def test_multiline_values_keep_their_line_breaks():
     assert normalize("Metformin  500 mg\nVitamin D", FieldType.MEDICATION_LIST) == (
         "Metformin 500 mg\nVitamin D"
     )
+
+
+def test_a_box_sized_ocr_run_does_not_veto_its_tick_box(tmp_path):
+    """A pen mark inside a tick box is unreadable to OCR too, so it comes back as a
+    garbage run sized to the box. Vetoing on containment alone removed precisely the
+    boxes that carried marks; the run has to be longer than the box to count."""
+    image = Image.new("RGB", (1600, 1600), "white")
+    draw = ImageDraw.Draw(image)
+    for x in (100, 300, 500):
+        draw.rectangle((x, 100, x + 40, 140), outline="#111", width=3)
+    draw.line((305, 105, 335, 135), fill="#111", width=5)
+    draw.line((335, 105, 305, 135), fill="#111", width=5)
+    path = tmp_path / "ticks.png"
+    image.save(path)
+
+    assert len(detect_checkboxes(path, [])) == 3
+    # What Tesseract does with a pen X: a three-letter run occupying the box's own bounds.
+    misread = [word("Wee", 300, 100, 340, 140)]
+    assert len(detect_checkboxes(path, misread)) == 3
+    # A genuine word that merely swallows small candidates still vetoes them.
+    swallowing = [word("Workers", 90, 95, 550, 145)]
+    assert detect_checkboxes(path, swallowing) == []
+
+
+def _option_row():
+    """Five boxes whose gaps are all inside OPTION_GAP_RATIO, so only a label can split
+    them."""
+    return [Box(float(x), 100.0, float(x + 40), 140.0) for x in (100, 200, 300, 600, 700)]
+
+
+def test_a_colon_label_between_boxes_splits_two_questions():
+    """Two questions printed side by side sit as close as one question's own options, so
+    gap alone merges them. The form's own punctuation says where the break is."""
+    assert [len(r) for r in _cluster_option_rows(_option_row(), [])] == [5]
+    between = [word("Please Address As:", 380, 100, 560, 140)]
+    assert [len(r) for r in _cluster_option_rows(_option_row(), between)] == [3, 2]
+
+
+def test_a_label_above_a_row_divides_nothing():
+    """Only a label printed inline with the boxes marks a break. One above belongs to the
+    row as a whole -- letting it divide split a question in half on a real form."""
+    above = [word("Sex:", 380, 20, 560, 60)]
+    assert [len(r) for r in _cluster_option_rows(_option_row(), above)] == [5]
