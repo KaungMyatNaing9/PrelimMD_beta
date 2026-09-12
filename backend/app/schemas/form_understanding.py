@@ -87,6 +87,12 @@ class DetectedFormField(BaseModel):
     is_blank: bool = True
     confidence: float = Field(default=0, ge=0, le=1)
     needs_review: bool = False
+    # Whether a second reader saw the same thing. Two readers that arrive at one value by
+    # different routes -- geometry from where the text sits, a model from what the page
+    # says -- corroborate each other; two that disagree mark the one place on the page
+    # worth a person's attention. "unread" means only one reader had anything to say,
+    # which is neither corroboration nor conflict.
+    agreement: Literal["corroborated", "disputed", "unread"] = "unread"
     # Oldest first. Empty until something replaces the extracted value.
     history: list[FieldRevision] = Field(default_factory=list)
 
@@ -114,6 +120,37 @@ class ResolvedFormField(BaseModel):
     validation_errors: list[ValidationError] = Field(default_factory=list)
 
 
+class Attestation(BaseModel):
+    """A person's record that they checked these values and stand behind them.
+
+    The faculty review's second point, and the one the pipeline had no answer to at all: a
+    reviewer could correct a value but could not say they had *looked*. Corrections and
+    approval are different acts -- a form where every field was already right and a form
+    nobody opened produce identical records without this.
+
+    It attests to *values*, not to a form. ``covers`` is a digest of the exact values that
+    were on screen when it was signed, so editing a field afterwards does not inherit
+    somebody's approval of what it used to say: the attestation stays on file and stops
+    matching. Append-only, like ``FieldRevision`` -- an attestation is never edited or
+    withdrawn, only superseded by a later one.
+    """
+
+    scope: str = "form"  # "form", or the section name when only part was checked
+    signed_by: str
+    signed_at: datetime
+    covers: str  # digest of the values attested to
+    field_ids: list[str] = Field(default_factory=list)
+    note: str | None = None
+    # How the signer was identified. Nothing authenticates them today -- a name is typed
+    # into a box -- and recording "unverified" is the difference between a record that is
+    # thin and a record that lies. An attestation reading "signed by M. Thiha" implies a
+    # check that did not happen, and in a clinical audit trail that implication is the
+    # dangerous part: the value of the trail is that it can be relied on, so where it
+    # cannot be, it has to say so itself. When authentication arrives this carries the
+    # method rather than needing a new field and a migration of everything already signed.
+    identity: Literal["unverified", "session", "sso", "signature"] = "unverified"
+
+
 class FormAnalysis(BaseModel):
     schema_version: Literal["2.0"] = "2.0"
     analysis_id: str
@@ -124,6 +161,7 @@ class FormAnalysis(BaseModel):
     matched_known_template: str | None = None
     warnings: list[str] = Field(default_factory=list)
     processing_time_ms: int
+    attestations: list[Attestation] = Field(default_factory=list)
 
 
 class CompletionSession(BaseModel):
