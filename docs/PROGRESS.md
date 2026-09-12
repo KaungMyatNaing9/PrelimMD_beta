@@ -1358,3 +1358,44 @@ same competition is scored on. Only suppression *after* the winner is chosen is 
 
 Final: precision **45.6%**, TEST2 72.5%, TEST4 44.4%, dev 100%, FUNSD 19.0%, zero layout
 flips across 26 pages, zero of 166 real answers rejected.
+
+
+## The architecture was switched off for every measurement (2026-09-11)
+
+Six experiments today tried to break one ceiling: label detection is lexical, so a caption
+the vocabulary cannot name is skipped, and 93.3% of legible answers are lost with it. Gap
+labels, gated gap labels, column alignment, text height, and two reading experiments -- all
+measured, all reverted or rejected.
+
+`vision_extractor.py` has said why in its own docstring since it was written: "geometric
+detection binds a value to a label by *position*, which fails on real scans... A model that
+sees the page reads the association directly." **That measurement had never been taken on
+FUNSD**, the corpus that demonstrates the problem. Every figure in this document, including
+today's, is `VISION_PROVIDER=disabled`.
+
+| stage, of 812 annotated pairs | geometry only | hybrid, vision on |
+|---|---|---|
+| answers reaching the pipeline | 32.5% | **60.8%** |
+| questions found as labels | 55.0% | **72.0%** |
+| **links reproduced** | **19.0%** | **47.5%** |
+
+On a matched ten-form sample the gap is wider still: 20.0% against 61.0%.
+
+**36 of 48 pages ran on the local `qwen2.5vl:7b`**, not Groq, because the free tier drained
+partway through -- so most of this gain requires no hosted service and no page leaving the
+machine. That is the better outcome for patient data, and it is also why the ten-form
+(mostly Groq, 61.0%) and fifty-form (mostly local, 47.5%) numbers differ: harder forms or a
+weaker model, and this run cannot separate the two.
+
+**The design stays hybrid.** Vision supplies comprehension, OCR supplies geometry, `fusion`
+merges them; regeneration needs exact boxes and vision models are unreliable at pixel
+coordinates. The finding is not "replace the geometric path" -- it is that the geometric
+path has been benchmarked alone and reported as if it were the product.
+
+### Measurement hygiene this exposed
+
+- Groq rate-limits and the pipeline **silently** falls back to the local model. Count it:
+  `grep -c 'falling back to the local model'` in the server log, and report it beside any
+  vision figure.
+- Never run two benchmarks against a vision-enabled server at once -- concurrency forces the
+  rate limit, so both runs mix readers and neither measures what it claims.
