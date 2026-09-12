@@ -1515,3 +1515,36 @@ feature decision, not tuning. Intake forms do contain some (medication lists, fa
 grids), so it is not purely academic.
 
 `evaluate_funsd.py` now always prints the split, so the two never get conflated again.
+
+
+## Where the table gap actually is (2026-09-12)
+
+Nine things measured against FUNSD in one session; one real finding, and the rest are
+recorded so nobody repeats them.
+
+**Ruled out.** Values discarded for want of a position: **zero** -- `locate_by_label` catches
+them all, so the "correct readings thrown away" theory is dead. Enlarged 2x2 tiling: -1.0,
+even though FUNSD pages are 1000px with up to 77 pairs and the size-based tiling returns a
+single piece for them. A local 7B model against a hosted 27B: **+0.5** -- four times the
+parameters for half a point, so raw model capacity is not the lever either.
+
+**A latent bug, fixed, that moved nothing.** `locate_values` and `locate_by_label` both
+returned dictionaries keyed by the caption. A table column repeats one caption down a row of
+cells, so six readings of `VOLUME` collapsed into one entry and every cell after the first
+found the same box, hit the same geometric field and was discarded as a disagreement. Both
+are now keyed by the reading's position. FUNSD came back **identical to the digit** (42.9%,
+70.7% non-tabular, 20.4% tabular) and intake is unchanged, so this removes a real collision
+class without touching today's constraint. Kept because it is a correctness fix, not a
+heuristic.
+
+**Where the gap is.** The diagnostic that matters: gold question `VOLUME`, ours `# REPS`,
+value read correctly as a cell of that row. The field exists, the model reads the value, and
+the *label* comes from geometry -- which picks the wrong column header. Nothing in this
+pipeline knows that a column header owns a whole column, so 55% of FUNSD's links are a shape
+it cannot express. That is a feature with a clear shape and it is the first FUNSD work that
+should be expected to move the number.
+
+Research note: since 2023 the field has moved to emitting tables as HTML or Markdown
+sequences from a single vision pass, rather than recovering cells and then pairing them
+(Docling, UniTabNet, InstructTable). Our prompt asks for flat label/value pairs, which
+cannot express a column header owning six cells however well the model reads them.
