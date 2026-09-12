@@ -47,11 +47,54 @@ def comparable(value) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
+def _repeat(argv: list[str], times: int) -> int:
+    """Run the score several times and report the median and the spread.
+
+    A single figure from a small set is a draw, not a measurement. Five runs of identical
+    code over the same five handwriting photographs and the same local model scored 42.9,
+    42.9, 53.1, 53.1 and 53.1 -- a ten-point spread on 49 fields -- and a prompting change
+    measured 42.9 before and after, which read as a clean null result until the reverted
+    code scored 53.1. The model is non-deterministic at `temperature: 0`, so anything
+    smaller than the spread cannot be resolved by one run.
+    """
+    import re as _re
+    import statistics
+    import subprocess
+
+    scores = []
+    for run in range(1, times + 1):
+        done = subprocess.run(
+            [sys.executable, __file__, *argv], capture_output=True, text=True, check=False
+        )
+        found = _re.search(r"ACCURACY (\d+)/(\d+) = ([\d.]+)%", done.stdout)
+        if not found:
+            reason = (done.stderr or done.stdout).strip().splitlines()
+            print(f"run {run}: no score -- {reason[-1] if reason else 'no output'}")
+            continue
+        scores.append(float(found.group(3)))
+        print(f"run {run}: {found.group(1)}/{found.group(2)} = {found.group(3)}%")
+    if not scores:
+        return 1
+    low, high = min(scores), max(scores)
+    print(f"\nmedian {statistics.median(scores):.1f}%   spread {low:.1f}-{high:.1f}% "
+          f"({high - low:.1f} points across {len(scores)} runs)")
+    if high - low >= 5:
+        print("  A spread this wide means one run proves nothing: quote the median and the")
+        print("  range, and treat any change smaller than the spread as unmeasured.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", default="http://127.0.0.1:8000")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--truth", default="ground_truth.json")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=0,
+        help="run N times and report the median and spread instead of a single draw",
+    )
     parser.add_argument(
         "--skip-defects",
         action="store_true",
@@ -64,6 +107,22 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.repeat > 1:
+        # Strip --repeat and its count in one pass. Filtering them separately left the
+        # count behind as a stray positional, and the child exited on the argument error
+        # with nothing on stdout -- which looked exactly like the API being down.
+        passthrough, skip = [], False
+        for argument in sys.argv[1:]:
+            if skip:
+                skip = False
+                continue
+            if argument == "--repeat":
+                skip = True
+                continue
+            if argument.startswith("--repeat="):
+                continue
+            passthrough.append(argument)
+        return _repeat(passthrough, args.repeat)
 
     truth_path = FORMS / args.truth
     truth = json.loads(truth_path.read_text())
