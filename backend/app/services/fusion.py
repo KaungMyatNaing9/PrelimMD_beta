@@ -26,6 +26,7 @@ actually reliable --
 This runs only when a vision provider is configured. With none, nothing here executes.
 """
 
+import logging
 import os
 from collections import Counter
 
@@ -41,6 +42,8 @@ MARK_TYPES = (FieldType.CHECKBOX, FieldType.SIGNATURE_PRESENCE, FieldType.MULTIP
 VISION_CONFIDENCE = 0.8
 # A reading whose position was estimated from its label, not measured from its own pixels.
 # The value may well be right; where it sits is a guess, so it says so.
+_LOG = logging.getLogger(__name__)
+
 ESTIMATED_CONFIDENCE = 0.6
 
 # EXPERIMENT (2026-09-12): whether the model's *label* comes with its value. `_adopt` takes
@@ -145,6 +148,11 @@ def fuse(
             box = approximate.get(field.label)
             estimated = box is not None
         if box is None:
+            # Counted, not silent. A value the model read correctly and we then discarded
+            # for want of a position is the most expensive kind of loss -- the hard part
+            # succeeded and the bookkeeping lost it -- and until now nothing said how often
+            # it happened.
+            _LOG.info("fusion: dropped unplaceable value for %r", field.label)
             continue
         # Guarding only the fields geometry already had left the hole this closes: a
         # question geometry never produced -- "Sex", "Marital Status" -- arrived through
