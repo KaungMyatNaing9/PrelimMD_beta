@@ -52,14 +52,34 @@ def main() -> int:
     parser.add_argument("--api", default="http://127.0.0.1:8000")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--truth", default="ground_truth.json")
+    parser.add_argument(
+        "--skip-defects",
+        action="store_true",
+        help=(
+            "Omit entries the truth file records under _placement_defects: values the "
+            "filler wrote into a heading, a column-header row or a sentence, where no "
+            "patient would write and no reader should look. Off by default, so the "
+            "headline number stays the pessimistic one and stays comparable with every "
+            "figure reported before these were found."
+        ),
+    )
     args = parser.parse_args()
 
-    truth = json.loads((FORMS / args.truth).read_text())
-    total = correct = 0
+    truth_path = FORMS / args.truth
+    truth = json.loads(truth_path.read_text())
+    # Forms sit beside their own ground truth, so a truth file in a subfolder names forms
+    # in that subfolder. Resolving against data/real-forms/ instead reported every form in
+    # NEW/ and TEST2/ as missing and then divided by zero.
+    defects = truth.get("_placement_defects", {}) if args.skip_defects else {}
+    total = correct = omitted = 0
     for name, expected in truth.items():
         if name.startswith("_"):
             continue
-        image = FORMS / name
+        if name in defects:
+            bad = {k for k in defects[name] if not k.startswith("_")}
+            omitted += len(bad & set(expected))
+            expected = {k: v for k, v in expected.items() if k not in bad}
+        image = truth_path.parent / name
         if not image.exists():
             print(f"!! missing {name}")
             continue
@@ -97,6 +117,11 @@ def main() -> int:
                 detail = "not read" if have is None else f"read {have!r}"
                 print(f"   {mark} {label:22} want {want!r:34} {detail}")
 
+    if not total:
+        print("\nNo forms scored -- check --truth and that the forms sit beside it.")
+        return 1
+    if omitted:
+        print(f"\n  omitted {omitted} entries whose value was never written on a field")
     print(f"\nREAL-FORM ACCURACY {correct}/{total} = {correct / total * 100:.1f}%")
     print("Gate 2 criterion: >= 95% on printed text")
     return 0

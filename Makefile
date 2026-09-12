@@ -16,6 +16,10 @@ frontend-dev:
 	cd frontend && npm run dev
 test:
 	cd backend && ../$(PY) -m pytest
+bench:
+	$(PY) scripts/benchmark_all.py
+bench-quick:
+	$(PY) scripts/benchmark_all.py --quick
 lint:
 	cd backend && ../$(PY) -m ruff check app tests
 	cd frontend && npm run lint
