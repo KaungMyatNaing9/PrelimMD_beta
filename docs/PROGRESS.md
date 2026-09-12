@@ -1478,3 +1478,36 @@ stable sample unlike the 49-field handwriting set):
 All neutral. Yesterday's 47.5% was not a lucky draw either -- it ran with a different
 Groq/local fallback mix (75% local against ~90% today), which is a hidden variable that now
 gets recorded with every vision figure.
+
+
+## FUNSD's headline was measuring a feature we never built (2026-09-12)
+
+Eight changes were measured against FUNSD and every one came back neutral: fusion gate
+(+0.5), the model's label adopted with its value (+0.4), rapidocr (-0.5), self-templating
+(-1.0 on fifty forms), enlarged 2x2 tiling (-1.0), and a local 7B model against a hosted 27B
+(+0.5 -- four times the parameters buying half a point). Only switching vision on ever moved
+it, 19.0% -> 41.5-45.3%.
+
+Inspecting the pairs that failed showed why. **38.5% of this split's links hang off a
+question that owns many answers** -- a table column header such as `VOLUME` linked to six
+cells -- and this pipeline binds one caption to one answer. It cannot represent that shape
+at all. Scored separately:
+
+| link type | share | score |
+|---|---|---|
+| **one caption, one answer** | 45% | **70.7%** |
+| table cell under a column header | 55% | **20.4%** |
+| combined | -- | 42.9% |
+
+So the product reads the shape it serves at about **71%**, and the 42.9% headline is a
+blend of that with a feature nobody has built. It corroborates the intake numbers taken by
+a different route on different data -- TEST2 76.8%, TEST4 65.1% -- which is the first time
+two independent corpora have agreed about this pipeline.
+
+**What this changes.** Eight neutral results were not eight bad ideas; none of them touched
+table structure, which is where the remaining FUNSD loss lives. Raising the headline means
+building table understanding -- a column header owning a row of cells -- and that is a
+feature decision, not tuning. Intake forms do contain some (medication lists, family-history
+grids), so it is not purely academic.
+
+`evaluate_funsd.py` now always prints the split, so the two never get conflated again.

@@ -17,6 +17,7 @@ machine, which matters more than cost for anything resembling patient data.
 import base64
 import json
 import logging
+import os
 import re
 import time
 import urllib.error
@@ -138,24 +139,42 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
     else:
         raise HTTPException(503, f"Unknown VISION_PROVIDER {provider!r}")
 
-    try:
-        raw = call(image)
-    except HTTPException:
+    if TILE_GRID > 1:
+        # EXPERIMENT: read every page in enlarged pieces, not only the ones that failed.
+        # A FUNSD scan is 1000px wide and can hold seventy-seven question/answer pairs, so
+        # its text is tiny; it never trips the downscale threshold and the size-based
+        # tiling divides 1000 by 1600 and returns one piece. Whatever the model does not
+        # return from that single look is simply lost, and arrival -- not binding -- is
+        # where 40-45% of FUNSD's answers go.
+        #
+        # Note this differs from the fallback below, whose pieces are crops at the page's
+        # own resolution: those were measured as no better, and the reason given was lost
+        # context. These are *enlarged*, which trades the same context for more pixels per
+        # character, so the earlier result does not settle it.
+        pieced = _read_in_pieces(image, call, grid=TILE_GRID)
+        if pieced.get("fields"):
+            raw = pieced
+        else:
+            raw = call(image)
+    else:
+        try:
+            raw = call(image)
+        except HTTPException:
         # The page defeated the model as a whole. Ask about its parts before giving up --
         # see ``_read_in_pieces``. Only a failed read gets here, so a page that answered
         # normally is never re-read and never costs a second call.
-        raw = _read_in_pieces(image, call)
-        if not raw:
-            raise
-    else:
+            raw = _read_in_pieces(image, call)
+            if not raw:
+                raise
+        else:
         # An empty list is the other way a read fails, and it does not raise. The prompt
         # is explicit that an empty list means the page is completely unfilled, so a form
         # that came back with nothing has either no answers on it or defeated the model.
         # The densest of five photographed forms returned exactly this, every time, and
         # scored 0 of its 13 fields while four comparable forms scored well; split in
         # four, the same model read 9 of them.
-        if expect_answers and not raw.get("fields"):
-            raw = _read_in_pieces(image, call) or raw
+            if expect_answers and not raw.get("fields"):
+                raw = _read_in_pieces(image, call) or raw
 
     fields = [
         VisionField(
@@ -179,6 +198,10 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
 # Beyond roughly this, a local model spends much longer per page for no accuracy gain —
 # it downsamples internally anyway. Form text stays legible well below it.
 MAX_EDGE_PIXELS = 1600
+
+# EXPERIMENT (2026-09-12): force every page into a grid of enlarged pieces. 0 or 1 keeps
+# the shipped behaviour, where pieces are only asked for after the whole page has failed.
+TILE_GRID = int(os.getenv("VISION_TILE_GRID", "0") or 0)
 
 
 def _encoded(image: Path) -> str:
@@ -248,19 +271,30 @@ def _call_ollama(image: Path) -> dict:
 TILE_OVERLAP = 0.12
 
 
-def _tiles(image: Path, into: Path) -> list[Path]:
+def _tiles(image: Path, into: Path, grid: int = 0) -> list[Path]:
     """Cut a page into pieces that each already fit inside ``MAX_EDGE_PIXELS``.
 
     Sized so no piece is downsampled on the way out, which is the point: the whole page
     has to shrink to fit, a piece does not.
+
+    ``grid`` forces a division the page's size alone would not ask for, and each piece is
+    then *enlarged* to fill ``MAX_EDGE_PIXELS``. That is for a page that is small in pixels
+    and dense in fields -- a FUNSD scan is 1000px wide and can carry seventy-seven
+    question/answer pairs, so its text is tiny, the page never trips the downscale
+    threshold, and the existing tiling divides 1000 by 1600 and returns a single piece.
+    The model is asked to read the whole dense page at once, every time, and what it does
+    not return is simply lost.
     """
     from PIL import Image
 
     with Image.open(image) as im:
         page = im.convert("L")
         width, height = page.size
-        across = max(1, -(-width // MAX_EDGE_PIXELS))
-        down = max(1, -(-height // MAX_EDGE_PIXELS))
+        if grid > 1:
+            across = down = grid
+        else:
+            across = max(1, -(-width // MAX_EDGE_PIXELS))
+            down = max(1, -(-height // MAX_EDGE_PIXELS))
         if across == 1 and down == 1:
             return []
         step_x, step_y = width / across, height / down
@@ -273,13 +307,21 @@ def _tiles(image: Path, into: Path) -> list[Path]:
                     min(width, int((col + 1) * step_x + step_x * TILE_OVERLAP)),
                     min(height, int((row + 1) * step_y + step_y * TILE_OVERLAP)),
                 ))
+                if grid > 1 and max(piece.size) < MAX_EDGE_PIXELS:
+                    # Enlarge, because the point of forcing the grid is to put more pixels
+                    # on each character than the whole page could afford.
+                    factor = MAX_EDGE_PIXELS / max(piece.size)
+                    piece = piece.resize(
+                        (round(piece.width * factor), round(piece.height * factor)),
+                        Image.LANCZOS,
+                    )
                 out = into / f"{image.stem}_r{row}c{col}.png"
                 piece.save(out)
                 made.append(out)
     return made
 
 
-def _read_in_pieces(image: Path, call) -> dict:
+def _read_in_pieces(image: Path, call, grid: int = 0) -> dict:
     """Ask about parts of a page when asking about the whole of it failed.
 
     A dense form can defeat a small model outright: on one photographed intake form the
@@ -298,7 +340,7 @@ def _read_in_pieces(image: Path, call) -> dict:
     import tempfile
 
     with tempfile.TemporaryDirectory() as folder:
-        pieces = _tiles(image, Path(folder))
+        pieces = _tiles(image, Path(folder), grid=grid)
         if not pieces:
             return {}
         merged: list[dict] = []

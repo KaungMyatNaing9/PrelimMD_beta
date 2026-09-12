@@ -33,6 +33,27 @@ def flat(text) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
+def tabular_questions(annotation: Path) -> set[str]:
+    """Questions that own more than one answer -- table column headers, not form fields.
+
+    38.5% of this split's links hang off such a question, and a caption owning six cells is
+    a shape this pipeline does not model at all: it binds one caption to one answer. Scoring
+    the two kinds separately says how much of the gap is table structure rather than reading.
+    """
+    entities = json.loads(annotation.read_text())["form"]
+    by_id = {e["id"]: e for e in entities}
+    owned: dict[str, int] = {}
+    for entity in entities:
+        if entity.get("label") != "question":
+            continue
+        for a, b in entity.get("linking", []):
+            other = by_id.get(b if a == entity["id"] else a)
+            if other is not None and other.get("label") == "answer" and flat(other["text"]):
+                owned[entity["id"]] = owned.get(entity["id"], 0) + 1
+    return {e["text"] for i, e in enumerate(entities)
+            if e["id"] in owned and owned[e["id"]] > 1}
+
+
 def gold_links(annotation: Path) -> list[tuple[str, str]]:
     """Every question -> answer pair the annotation asserts."""
     entities = json.loads(annotation.read_text())["form"]
@@ -131,6 +152,7 @@ def main() -> int:
     # matched against every later upload, and seventeen strays once inflated two Gate 3
     # figures with nobody noticing.
     borrowed: list[str] = []
+    table_hit, table_all, plain_hit, plain_all = [0], [0], [0], [0]
     for annotation in annotations:
         image = DATA / args.split / "images" / f"{annotation.stem}.png"
         if not image.exists():
@@ -145,6 +167,15 @@ def main() -> int:
             fields = reading.get("detected_fields", [])
         else:
             fields = analyse(args.api, image).get("detected_fields", [])
+        columns = tabular_questions(annotation)
+        for question, answer in pairs:
+            got = reproduced((question, answer), fields)
+            if question in columns:
+                table_hit[0] += got
+                table_all[0] += 1
+            else:
+                plain_hit[0] += got
+                plain_all[0] += 1
         hit = sum(1 for p in pairs if reproduced(p, fields))
         # Decompose the loss. A pair can fail because the answer never reached us at all
         # (detection or OCR), or because it reached us and was bound to the wrong caption.
@@ -172,6 +203,13 @@ def main() -> int:
     print(f"\nFUNSD LINKING {found}/{total} = {found / total * 100:.1f}% of annotated "
           f"question -> answer pairs reproduced")
     print(f"  {len(annotations)} forms from {args.split}")
+    if plain_all[0]:
+        print(f"  one caption, one answer : {plain_hit[0]}/{plain_all[0]} = "
+              f"{plain_hit[0] / plain_all[0] * 100:.1f}%")
+    if table_all[0]:
+        print(f"  table cell under a column header: {table_hit[0]}/{table_all[0]} = "
+              f"{table_hit[0] / table_all[0] * 100:.1f}%  <- a shape this pipeline "
+              f"does not model")
     print(f"  of those pairs, the answer text reached us at all in {seen_answer[0]}/{total} "
           f"= {seen_answer[0] / total * 100:.1f}%")
     print(f"  and the question text was found as a label in {seen_question[0]}/{total} "
