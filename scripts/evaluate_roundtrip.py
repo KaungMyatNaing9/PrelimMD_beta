@@ -13,7 +13,6 @@ clinics count.
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,20 +21,30 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.services.canonical_registry import match, norm
-from app.services.templates import DERIVED_ROOT, registry
 
 FORMS = ROOT / "data/real-forms"
 
-def _release(template_id: str) -> None:
-    """Delete a template learned only to score a run.
+def _registered(api: str) -> list[str]:
+    """Template ids the server currently has, so a leak is visible rather than inherited."""
+    try:
+        return sorted(json.loads(_curl(f"{api}/api/v1/health")).get("templates", []))
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
+def _release(api: str, template_id: str) -> None:
+    """Delete a template learned only to score a run, *through the server*.
+
+    This used to rmtree the folder and call `registry.load()` -- but in this script's own
+    process, not the server's. The server caches its registry in memory, so the template
+    stayed live there while its folder vanished from disk: a phantom, matched against every
+    later upload and undeletable, curable only by a restart. That is where the stray T50 and
+    T51 came from, and the seventeen strays that once inflated placement to 84.2%.
 
     Derived ids come from a fixed range (T50-T99). A script that learns one per form per
     run and never releases it exhausts that range, and then every later run fails.
     """
-    folder = DERIVED_ROOT / template_id
-    if folder.exists():
-        shutil.rmtree(folder)
-    registry.load()
+    _curl("-X", "DELETE", f"{api}/api/v1/templates/{template_id}")
 
 
 
@@ -70,8 +79,19 @@ def readable(analysis: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=150,
+        help=(
+            "Resolution the regenerated PDF is rasterised at before being re-read. "
+            "The default is what a middling scan gives; raise it to separate regeneration "
+            "fidelity from the OCR floor."
+        ),
+    )
     parser.add_argument("--api", default="http://127.0.0.1:8000")
     args = parser.parse_args()
+    registry_before = _registered(args.api)
 
     truth = json.loads((FORMS / "ground_truth.json").read_text())
     kept = total = 0
@@ -100,21 +120,40 @@ def main() -> int:
 
         out = ROOT / "artifacts" / f"roundtrip_{image.stem}.pdf"
         out.parent.mkdir(parents=True, exist_ok=True)
-        _curl(
-            "-o",
-            str(out),
-            f"{args.api}/api/v1/form-analyses/{first['analysis_id']}"
-            f"/regenerate?template_id={template_id}",
-        )
+        try:
+            _curl(
+                "-o",
+                str(out),
+                f"{args.api}/api/v1/form-analyses/{first['analysis_id']}"
+                f"/regenerate?template_id={template_id}",
+            )
         # The regenerated PDF carries the blank form as a raster and the values as text,
         # so reading its text layer would see values with no labels to bind them to.
         # Rasterising first is also the fairer test: it is how a person would receive it.
-        subprocess.run(
-            ["pdftoppm", "-jpeg", "-r", "150", "-f", "1", "-l", "1", str(out), str(out.with_suffix(""))],
-            check=True,
-        )
+        #
+        # The resolution is a parameter because it decides what this script measures. At
+        # 150 dpi most of the losses are single characters -- 15206 read back as 45206,
+        # 09/12/1979 as 99/12/1979 -- which is this project's OCR floor rather than any
+        # infidelity in the regeneration. Run it at both and the difference says which of
+        # the two is being scored.
+            subprocess.run(
+                ["pdftoppm", "-jpeg", "-r", str(args.dpi), "-f", "1", "-l", "1",
+                 str(out), str(out.with_suffix(""))],
+                check=True,
+            )
+        finally:
+            # Release before re-reading, not after. The template was derived *from this
+            # very page*, and while it stays registered it is matched against the
+            # regenerated copy and merged into the reading -- so the round trip would be
+            # scoring the template's influence on its own re-read rather than the fidelity
+            # of the regeneration. It is circular, and on one form it was actively worse:
+            # the surname read `ee` with the template live and `Okonkwo` without it.
+            #
+            # In a `finally` because releasing only on the happy path leaks: any failure
+            # above leaves the template registered for every later run. Measured
+            # 2026-09-11, this script and `evaluate_placement.py` were both leaking.
+            _release(args.api, template_id)
         again = readable(analyse(args.api, out.with_name(out.stem + "-1.jpg")))
-        _release(template_id)
 
         survived = []
         for label, want in expected.items():
@@ -135,6 +174,9 @@ def main() -> int:
             mark = "ok  " if ok else "lost"
             print(f"   {mark} {label:22} {want!r:34} -> {have!r}")
 
+    if _registered(args.api) != registry_before:
+        print("!! templates leaked -- registry changed during this run, so "
+              "every later measurement is against a polluted registry")
     print(f"\nROUND-TRIP {kept}/{total} values survived = {kept / total * 100:.1f}%")
     print(f"Forms retaining at least half their values: {faithful}")
     print("Gate 3 criterion: >= 3 real layouts round-trip faithfully")
