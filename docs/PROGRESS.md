@@ -1445,8 +1445,18 @@ it. No human enrols anything.
 | hybrid, cold | 81.0% |
 | **hybrid + self-templating** | **84.1%** |
 
-+6.4 on the geometric path, +3.1 on top of vision, **no form regressed** in twenty
-measurements. Two forms carry most of it (`hoag` 7/16 -> 10/16 cold, 15/16 -> 16/16 with
++6.4 on the geometric path, +3.1 on top of vision, no form regressed in twenty
+measurements -- **but treat this as unconfirmed.**
+
+The same technique on FUNSD: **+3.0 on ten forms, -1.0 on all fifty** (41.5% -> 40.5%, 42
+templates derived). Ten forms produced a false positive of the same size and sign as the
+intake result, which rests on 63 fields. Until intake is reproduced on a larger set, the
+honest position is that self-templating is **unproven**, not proven.
+
+Under self-templating FUNSD's answer-arrival rate *fell* (~60% -> 55.3%), so on noisy
+scans the derived template is actively worse than no template. Intake forms are clean
+digital renders whose printed rules survive into a usable template, which would explain a
+genuine split -- but that is a hypothesis, not a finding. Two forms carry most of it (`hoag` 7/16 -> 10/16 cold, 15/16 -> 16/16 with
 vision), so the effect size wants more forms before it is trusted to the point -- but the
 direction is clean and the mechanism is sound: structure and content are independent, so
 learning where the answer regions are does not presuppose what is written in them.
