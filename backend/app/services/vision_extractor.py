@@ -617,16 +617,23 @@ def _normalize(text: str) -> str:
 
 def locate_values(
     fields: list[VisionField], words: list[Word], page_w: float, page_h: float
-) -> dict[str, tuple[float, float, float, float]]:
+) -> dict[int, tuple[float, float, float, float]]:
     """Recover a normalized bounding box for each value by matching it to OCR words.
 
     The model reads *what* the value says; OCR knows *where* it sits. Matching one onto
     the other keeps regeneration accurate without trusting the model for coordinates.
     Values OCR never saw — unreadable handwriting, for instance — get no box here; see
     ``locate_by_label`` for what happens to those.
+
+    **Keyed by the reading's position, not by its label.** A table column repeats one
+    caption down a row of cells -- `VOLUME` over six figures -- and keying by label
+    collapsed all six into a single entry, so five correct readings were lost before
+    fusion ever saw them. Measured on FUNSD, 38.5% of annotated links hang off a caption
+    that owns more than one answer, and this pipeline scored 20.4% on those against 70.7%
+    on ordinary one-caption-one-answer fields.
     """
-    boxes: dict[str, tuple[float, float, float, float]] = {}
-    for field in fields:
+    boxes: dict[int, tuple[float, float, float, float]] = {}
+    for position, field in enumerate(fields):
         if not field.value:
             continue
         wanted = _normalize(field.value)
@@ -665,7 +672,7 @@ def locate_values(
             matched = _best_cluster(candidates, wanted)
             if matched is None:
                 continue
-        boxes[field.label] = (
+        boxes[position] = (
             min(w.x0 for w in matched) / page_w,
             min(w.y0 for w in matched) / page_h,
             (max(w.x1 for w in matched) - min(w.x0 for w in matched)) / page_w,
@@ -680,7 +687,7 @@ LABEL_ANSWER_WIDTH = 0.95
 
 def locate_by_label(
     fields: list[VisionField], words: list[Word], page_w: float, page_h: float
-) -> dict[str, tuple[float, float, float, float]]:
+) -> dict[int, tuple[float, float, float, float]]:
     """Where each value *probably* sits, judged from its label rather than its text.
 
     ``locate_values`` matches a model reading onto the OCR words that spell it, which is
@@ -703,8 +710,8 @@ def locate_by_label(
     from app.services.word_source import group_lines_tolerant
 
     lines = group_lines_tolerant(words)
-    boxes: dict[str, tuple[float, float, float, float]] = {}
-    for field in fields:
+    boxes: dict[int, tuple[float, float, float, float]] = {}
+    for position, field in enumerate(fields):
         if not field.value:
             continue
         wanted = _normalize(field.label)
@@ -732,7 +739,7 @@ def locate_by_label(
             continue
         top = min(w.y0 for w in run)
         bottom = max(w.y1 for w in run)
-        boxes[field.label] = (
+        boxes[position] = (
             right / page_w,
             top / page_h,
             (limit - right) / page_w,

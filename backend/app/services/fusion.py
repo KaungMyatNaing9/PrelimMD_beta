@@ -89,10 +89,14 @@ def fuse(
     unique = {norm(f.label_text): f for f in geometric if counts[norm(f.label_text)] == 1}
     fused = list(geometric)
 
-    for field in seen:
+    for position, field in enumerate(seen):
         if not field.value:
             continue
-        box = boxes.get(field.label)
+        # By position, not by caption. A table column repeats one caption down a row of
+        # cells, and keying these lookups by label meant every cell after the first found
+        # the same box, landed on the same geometric field, and was thrown away as a
+        # disagreement. 38.5% of FUNSD's annotated links hang off such a caption.
+        box = boxes.get(position)
         existing = _field_at(box, geometric)
         if existing is None and counts[norm(field.label)] == 1:
             # Position could not settle it, and exactly one field carries this label, so
@@ -145,7 +149,7 @@ def fuse(
             # estimated box is worth more than no field: it is enough to draw an overlay
             # and for a person to check, and it is marked so nothing mistakes it for a
             # measured position.
-            box = approximate.get(field.label)
+            box = approximate.get(position)
             estimated = box is not None
         if box is None:
             # Counted, not silent. A value the model read correctly and we then discarded
