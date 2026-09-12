@@ -21,3 +21,41 @@ details.history ol{margin:.3rem 0 0;padding-left:1.2rem}
 details.history li{margin:.15rem 0}
 details.history code{background:rgba(0,0,0,.06);padding:0 .25rem;border-radius:3px}
 details.history small{opacity:.7}
+
+/* Sign-off. Amber until somebody has confirmed the values, green once they have --
+   an unreviewed form should not look finished. */
+.signoff {
+  border: 1px solid #d9a441;
+  background: #fdf6e7;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+}
+.signoff.signed {
+  border-color: #3f8f5c;
+  background: #eef7f0;
+}
+.signoff p { margin: 0.35rem 0; }
+.signoff input { margin-right: 0.5rem; }
+.signoff details { margin-top: 0.5rem; }
+.signoff summary { cursor: pointer; color: #6b5a33; }
+
+/* Two readers agreeing is the cheapest confidence available, and disagreement marks the
+   one place worth a person's time. Both are worth saying out loud in the review list. */
+.agree { color: #3f8f5c; }
+.dispute { color: #b4532a; font-weight: 600; }
+
+/* History tab. A timeline is a list of things that happened, so it reads as one: time
+   first in small type, what changed underneath it. */
+.toolbar.tabs button:disabled{background:#1d4ed8;color:#fff;opacity:1}
+.historytab h2{font-size:1rem;margin:1.4rem 0 .5rem}
+.timeline{list-style:none;margin:0;padding:0;border-left:2px solid #e2e8f0}
+.timeline li{position:relative;padding:.55rem 0 .55rem 1rem}
+.timeline li::before{content:"";position:absolute;left:-5px;top:1rem;width:8px;height:8px;border-radius:50%;background:#94a3b8}
+.timeline li.corrected::before{background:#d97706}
+.timeline li[class~="signed-off"]::before{background:#16a34a}
+.timeline li.current{background:#f8fafc}
+.timeline small{color:#64748b}
+.timeline code{background:#f1f5f9;padding:.05rem .3rem;border-radius:3px}
+.changes{margin:.3rem 0 0;padding-left:1.1rem}
+.changes li{padding:.15rem 0}
