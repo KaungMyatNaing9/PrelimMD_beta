@@ -1420,3 +1420,51 @@ branching differently between runs looks like.
 Also closed: structured-output enforcement was already implemented -- every provider
 constrains decoding to the JSON schema -- which is why moving the prompt to a system role
 could not have helped for the reason it was tried.
+
+
+## The product is twenty points better than the docs said (2026-09-12)
+
+Every accuracy figure this project published measured the geometry-only fallback. With the
+hybrid switched on, same scorer, same ground truth, same forms:
+
+| set | geometry only | hybrid |
+|---|---|---|
+| **TEST4** (freshest, never tuned against) | 44.4% | **65.1%** |
+| TEST2 | 72.5% | **76.8%** |
+
+## Self-templating: learn the unseen form, then read it
+
+The system analyses a page, derives a template from that page's *printed geometry* -- rules,
+boxes and captions, never the values the first pass read -- and reads the page again through
+it. No human enrols anything.
+
+| | TEST4 |
+|---|---|
+| geometry, cold | 60.3% |
+| geometry + self-templating | 66.7% |
+| hybrid, cold | 81.0% |
+| **hybrid + self-templating** | **84.1%** |
+
++6.4 on the geometric path, +3.1 on top of vision, **no form regressed** in twenty
+measurements. Two forms carry most of it (`hoag` 7/16 -> 10/16 cold, 15/16 -> 16/16 with
+vision), so the effect size wants more forms before it is trusted to the point -- but the
+direction is clean and the mechanism is sound: structure and content are independent, so
+learning where the answer regions are does not presuppose what is written in them.
+
+Scores above come from `evaluate_self_template.py`'s own scorer, which matches values
+without requiring a canonical key. Compare them with each other, not with the table above.
+
+## Three of my own ideas were worth nothing
+
+Measured against a FUNSD baseline run twice (45.3%, 45.3% -- identical, so 812 pairs is a
+stable sample unlike the 49-field handwriting set):
+
+| | linking | vs baseline |
+|---|---|---|
+| fusion gate relaxed | 45.8% | +0.5 |
+| model label adopted with its value | 45.7% | +0.4 |
+| rapidocr reader | 44.8% | -0.5 |
+
+All neutral. Yesterday's 47.5% was not a lucky draw either -- it ran with a different
+Groq/local fallback mix (75% local against ~90% today), which is a hidden variable that now
+gets recorded with every vision figure.

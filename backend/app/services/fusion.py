@@ -26,6 +26,7 @@ actually reliable --
 This runs only when a vision provider is configured. With none, nothing here executes.
 """
 
+import os
 from collections import Counter
 
 from app.schemas.form_understanding import DetectedFormField, RequiredStatus
@@ -41,6 +42,12 @@ VISION_CONFIDENCE = 0.8
 # A reading whose position was estimated from its label, not measured from its own pixels.
 # The value may well be right; where it sits is a guess, so it says so.
 ESTIMATED_CONFIDENCE = 0.6
+
+# EXPERIMENT (2026-09-12): whether the model's *label* comes with its value. `_adopt` takes
+# the model's value and keeps geometry's caption, which splits a pairing the model read as
+# one thing -- so a correct value lands under a wrong question and the link fails on the
+# label side. Measured on FUNSD: 60.8% of answers arrive, 47.5% link.
+ADOPT_MODEL_LABEL = os.getenv("FUSION_ADOPT_LABEL", "") == "1"
 # Two readers agreeing is stronger evidence than either alone, but not proof: they can
 # still share an OCR error upstream, so this stops short of certainty.
 CORROBORATED_CONFIDENCE = 0.95
@@ -109,7 +116,7 @@ def fuse(
             # splits correctly into street, city, state and zip. Nothing to gain, a real
             # thing to lose, so the gate stays.
             if existing.normalized_value in (None, "", False) or existing.needs_review:
-                _adopt(existing, field.value)
+                _adopt(existing, field.value, field.label)
                 continue
             # Geometry already had a confident answer here, so the model does not get to
             # replace it -- but whether the two agree is worth recording either way.
@@ -196,8 +203,14 @@ def _among_tick_boxes(
     return False
 
 
-def _adopt(field: DetectedFormField, value: str) -> None:
+def _adopt(field: DetectedFormField, value: str, label: str | None = None) -> None:
     """Replace a geometric field's value, keeping everything positional about it.
+
+    ``label`` is the caption the model read *with* that value. The two came from one
+    reading, so taking the value while keeping geometry's caption splits a pairing the
+    model never split -- and a correct value under the wrong question is a wrong field.
+    Only adopted when the vocabulary cannot name geometry's caption, since a caption that
+    maps to a canonical key has already been corroborated by something other than position.
 
     Replacing a value geometry *had* is a disagreement, and it was being recorded as
     "unread" -- which is what a field only one reader saw looks like. That is why the
@@ -217,6 +230,13 @@ def _adopt(field: DetectedFormField, value: str) -> None:
     field.is_blank = False
     field.source = "ocr_vision_fused"
     field.confidence = VISION_CONFIDENCE
+    if ADOPT_MODEL_LABEL and label and not field.canonical_key:
+        mapped, score, reason = match(label)
+        field.label_text = label.rstrip(":")
+        field.normalized_label = norm(label)
+        field.canonical_key = mapped.canonical_key if mapped else None
+        field.mapping_confidence = score
+        field.mapping_reason = reason
     field.needs_review = not bool(field.canonical_key)
     if replaced in (None, "", False) or _same_answer(replaced, value):
         field.agreement = "unread"
