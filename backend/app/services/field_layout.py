@@ -49,7 +49,7 @@ def detect_boxes(image_path: Path) -> list[Box]:
     vertical = cv2.morphologyEx(
         binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 40)))
     )
-    grid = cv2.dilate(horizontal | vertical, np.ones((3, 3), np.uint8))
+    grid = cv2.dilate(cv2.bitwise_or(horizontal, vertical), np.ones((3, 3), np.uint8))
 
     found = []
     contours, _ = cv2.findContours(grid, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -136,6 +136,13 @@ BORDER_COVERAGE = 0.7
 # A tick box is square within tolerance and about the height of a line of text. Anything
 # squarer-but-larger is a framed section; anything smaller is scan speckle.
 CHECKBOX_ASPECT = 1.5
+# Above this share of dark pixels a candidate is a solid shape, not a box with something
+# drawn in it. A ticked box reads about 0.39, an empty one about 0.15.
+MAX_BOX_INK = 0.85
+# How much wider than a tick box a text run must be before it may veto that box. The veto
+# exists to remove candidates that are really a stray glyph inside a *longer* word, so
+# "longer" has to be tested, not assumed -- see the veto's own note in detect_checkboxes.
+VETO_WIDTH_RATIO = 1.5
 CHECKBOX_MIN_SIDE = 0.006
 CHECKBOX_MAX_SIDE = 0.030
 
@@ -177,19 +184,54 @@ def detect_checkboxes(image_path: Path, words: list[Word] | None = None) -> list
         # fills its bounding rect poorly.
         if cv2.contourArea(approx) / (bw * bh) < BORDER_COVERAGE:
             continue
+        # A tick box is an outline: empty inside, or carrying a mark that still leaves
+        # most of the interior white. A solid square is something else -- the two filled
+        # squares in a clinic's logo were being read as an option pair, and because they
+        # are solid they then read as *ticked*. Excluding them by ink is what keeps that
+        # from having to be absorbed by the mark threshold instead.
+        if ink_ratio(image, Box(float(x), float(y), float(x + bw), float(y + bh))) > MAX_BOX_INK:
+            continue
         found.append(Box(float(x), float(y), float(x + bw), float(y + bh)))
 
-    # The decisive test: a tick box is drawn in the form's rule ink, so it is not part of
-    # any word OCR read. A character that happens to approximate a quadrilateral -- the
-    # 0 and 4 in "1420" -- sits inside a recognised multi-character word, and dropping
-    # those needs no assumption about how a particular form spaces its options. A box that
-    # OCR mistook for a lone glyph keeps its place, since that reading is one character.
+    # OCR gets a veto only over candidates that coincide with something clearly *longer*
+    # than a tick box.
+    #
+    # Tesseract cannot read a ballot box -- U+2610 and U+2612 are absent from its training
+    # data, a known and unfixed limitation -- so it renders an empty box as whatever pair
+    # of letters the outline resembles: "LJ", "Cl", "CJ", "Qd", "CI". Those are two
+    # characters occupying exactly the box's own bounds, so a two-character threshold
+    # vetoed every real tick box on a form OCR happened to read that way: 42 detected,
+    # 0 surviving. Optical mark recognition is deliberately independent of character
+    # recognition for this reason -- geometry finds the box, ink reads the mark.
+    #
+    # "Coincide" has to mean containment, not IoU. A stray glyph inside a longer word --
+    # the ":" in "DOB:", the "0" in "1420" -- is small next to the word's own box, and
+    # IoU divides by their *union*, which the word dominates; a 130px candidate inside a
+    # 660px word scores an IoU of about 0.2, below any threshold that would not also
+    # reject two boxes that merely sit close together. The share of the *candidate's own*
+    # area the word covers does not have this problem: near 1.0 for a glyph swallowed by
+    # a real word, near 0 for two boxes that just happen to be near each other. On one
+    # real form this distinction was the difference between 8 false checkboxes surviving
+    # into the page's option rows and none.
+    #
+    # The run also has to be *longer* than the box, which is what this paragraph always
+    # claimed and never tested. A pen X drawn inside a real tick box is unreadable to
+    # Tesseract too, so it comes back as a garbage run of letters -- "Wee", "ely" -- sized
+    # to the box it was drawn in, not to a word. Containment alone cannot tell that from a
+    # genuine word, so on a handwritten page the veto removed precisely the boxes that
+    # carried marks: the Sex row lost the one box a patient had ticked and kept Male and
+    # Other. Requiring the run to be meaningfully wider keeps the case the veto was built
+    # for -- ":" inside "DOB:", a digit inside "1420" -- and drops the case it was not.
     if words is not None:
-        text_runs = [w for w in words if len(_alphanumeric(w.text)) >= 2]
+        text_runs = [w for w in words if len(_alphanumeric(w.text)) >= 3]
         found = [
             b
             for b in found
-            if not any(_iou(b, Box(t.x0, t.y0, t.x1, t.y1)) > 0.3 for t in text_runs)
+            if not any(
+                _contained_share(b, Box(t.x0, t.y0, t.x1, t.y1)) > 0.6
+                and (t.x1 - t.x0) >= (b.x1 - b.x0) * VETO_WIDTH_RATIO
+                for t in text_runs
+            )
         ]
 
     # A drawn box yields an inner and an outer contour a pixel or two apart.
@@ -247,13 +289,29 @@ def captions_for_row(
             continue
         names[i] = word
         taken.add(key)
-    return [names[i] for i in range(len(row))] if len(names) == len(row) else None
+    if len(names) != len(row):
+        return None
+    # A caption is sometimes more than one word -- "Full Time", "Legally Separated" -- and
+    # this only ever returns the single nearest one, so a caption like that reports just
+    # its first word. Widening the seed into its full phrase was tried and reverted: on a
+    # row packed with several questions ("Visually Impaired: Yes No  Hearing Impaired: Yes
+    # No") it had no reliable place to stop, and pulled a field's own label into its
+    # caption on one row while pulling a neighbouring field's text into another. The
+    # single-word result is incomplete but never wrong; the widened one was sometimes both.
+    return [names[i] for i in range(len(row))]
 
 
 def _iou(a: Box, b: Box) -> float:
     overlap = _span(a.x0, a.x1, b.x0, b.x1) * _span(a.y0, a.y1, b.y0, b.y1)
     union = a.width * a.height + b.width * b.height - overlap
     return overlap / union if union > 0 else 0.0
+
+
+def _contained_share(inner: Box, outer: Box) -> float:
+    """Share of ``inner``'s own area that ``outer`` covers."""
+    overlap = _span(inner.x0, inner.x1, outer.x0, outer.x1) * _span(inner.y0, inner.y1, outer.y0, outer.y1)
+    area = max(inner.width * inner.height, 1e-9)
+    return overlap / area
 
 
 def _encloses(outer: Box, inner: Box) -> bool:
@@ -308,14 +366,133 @@ def label_for_box(
     reach = max(box.height * 2.5, 40.0)
     best: tuple[float, list[Word]] | None = None
     for line in candidates:
-        x0, y0 = min(w.x0 for w in line), min(w.y0 for w in line)
-        x1, y1 = max(w.x1 for w in line), max(w.y1 for w in line)
-        if not left_only and y1 <= box.y0 + 2 and _span(x0, x1, box.x0, box.x1) > 0:
+        y0, y1 = min(w.y0 for w in line), max(w.y1 for w in line)
+        if not left_only and y1 <= box.y0 + 2:
+            run = _run_over(line, box)
+            if run is None:
+                continue
             distance = box.y0 - y1  # above
-        elif x1 <= box.x0 + 2 and _span(y0, y1, box.y0, box.y1) > 0:
-            distance = (box.x0 - x1) * (1.0 if left_only else 1.5)
         else:
-            continue
+            if _span(y0, y1, box.y0, box.y1) <= 0:
+                continue
+            run = _run_left_of(line, box)
+            if run is None:
+                continue
+            distance = (box.x0 - max(w.x1 for w in run)) * (1.0 if left_only else 1.5)
         if distance <= reach and (best is None or distance < best[0]):
-            best = (distance, line)
+            best = (distance, run)
     return best[1] if best else None
+
+
+def _run_left_of(box_line: list[Word], box: Box) -> list[Word] | None:
+    """The label run nearest the box among the words of a line that sit left of it.
+
+    A form row carries more than one label -- "Date of Birth: ____   Sex: ____" is one
+    OCR line -- so measuring the whole line's right edge against the box rejects the line
+    whenever the label wanted is not its last. That is how a date of birth went missing
+    the moment OCR started reading the "Sex:" beside it well enough to keep.
+    """
+    left = [w for w in box_line if w.x1 <= box.x0 + 2]
+    if not left:
+        return None
+    return _whole_or_run(box_line, split_runs(left)[-1])
+
+
+def _run_over(box_line: list[Word], box: Box) -> list[Word] | None:
+    """The run of a line sitting above the box that overlaps it horizontally."""
+    best: tuple[float, list[Word]] | None = None
+    for run in split_runs(box_line):
+        overlap = _span(min(w.x0 for w in run), max(w.x1 for w in run), box.x0, box.x1)
+        if overlap > 0 and (best is None or overlap > best[0]):
+            best = (overlap, run)
+    return _whole_or_run(box_line, best[1]) if best else None
+
+
+def _whole_or_run(box_line: list[Word], run: list[Word]) -> list[Word]:
+    """The original line object when the run is all of it, else the run.
+
+    Callers mark a line consumed by its identity, so a run covering the whole line has
+    to come back as that same list rather than a copy of it.
+    """
+    return box_line if len(run) == len(box_line) else run
+
+
+# A caption printed under a rule is set close beneath it. The reach is a fraction of the
+# rule's own writable height so it scales with page resolution.
+CAPTION_REACH = 0.7
+# Two captions head separate columns when this many median word heights separate them.
+# Below it they are one caption: "ZIP CODE", "Phone Number", "APT #".
+CAPTION_GAP_RATIO = 1.2
+
+
+def columns_beneath(box: Box, words: list[Word]) -> list[tuple[list[Word], float, float]]:
+    """The columns a rule is divided into by the captions printed under it.
+
+    A row like
+
+        _______________________________________
+            CITY            STATE     ZIP CODE
+
+    carries no label to its left. The captions beneath *are* the field names, and the
+    wall between two columns is the midpoint between neighbouring caption centres --
+    captions are set centred under their column, so the midpoint is the only wall the
+    form actually draws.
+
+    This is the right reading only when the rule has no label of its own. On
+    ``Address: ______`` captioned ``STREET   APT #`` the left label names one field and
+    the captions describe its parts, so splitting there would invent two fields and
+    destroy the address. This function reports geometry; the caller decides.
+
+    Captions are searched among *all* words rather than the free label candidates,
+    because a caption printed under one rule falls inside the writable area of the next
+    rule down, and has normally been claimed as that rule's contents already.
+    """
+    band_top = box.y1
+    band_bottom = box.y1 + box.height * CAPTION_REACH
+    inside = [
+        w
+        for w in words
+        if band_top <= (w.y0 + w.y1) / 2 <= band_bottom
+        and w.x0 >= box.x0 - 2
+        and w.x1 <= box.x1 + 2
+    ]
+    if len(inside) < 2:
+        return []
+    inside.sort(key=lambda w: w.x0)
+    em = sorted(w.y1 - w.y0 for w in inside)[len(inside) // 2]
+    groups: list[list[Word]] = [[inside[0]]]
+    for word in inside[1:]:
+        if word.x0 - groups[-1][-1].x1 > em * CAPTION_GAP_RATIO:
+            groups.append([word])
+        else:
+            groups[-1].append(word)
+    if len(groups) < 2:
+        return []
+    centres = [(min(z.x0 for z in g) + max(z.x1 for z in g)) / 2 for g in groups]
+    columns = []
+    for i, group in enumerate(groups):
+        left = box.x0 if i == 0 else (centres[i - 1] + centres[i]) / 2
+        right = box.x1 if i == len(groups) - 1 else (centres[i] + centres[i + 1]) / 2
+        columns.append((group, left, right))
+    return columns
+
+
+def split_runs(words: list[Word]) -> list[list[Word]]:
+    """Split a row into the runs of words separated by wide horizontal gaps.
+
+    Inside one cell the words of a value sit a space apart; between two cells the
+    unfilled remainder of the rule leaves a gap several times that. This is the same
+    tell ``word_source.label_run_start`` uses, for the same reason -- a value and a
+    caption cannot be told apart by what the words look like.
+    """
+    if not words:
+        return []
+    ordered = sorted(words, key=lambda z: z.x0)
+    em = sorted(z.y1 - z.y0 for z in ordered)[len(ordered) // 2]
+    runs: list[list[Word]] = [[ordered[0]]]
+    for word in ordered[1:]:
+        if word.x0 - runs[-1][-1].x1 > em * CAPTION_GAP_RATIO:
+            runs.append([word])
+        else:
+            runs[-1].append(word)
+    return runs

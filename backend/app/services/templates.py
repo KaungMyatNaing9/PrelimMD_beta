@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 try:
@@ -44,6 +45,42 @@ def _geometric_score(matches, query_keys, master_keys) -> float:
     if inliers < MIN_GEOMETRIC_MATCHES:
         return 0.0
     return inliers / len(ranked)
+
+
+def release(template_id: str) -> bool:
+    """Delete a template that was learned at runtime, and re-read the registry.
+
+    Deriving a template *registers* it, and a registered template is matched against every
+    later upload -- so a script that learns one per form to inspect it silently changes
+    what the extractor reads next. Surveying seven forms once left seventeen behind, and
+    two Gate 3 figures were reported against that polluted registry before anyone noticed.
+    Anything that derives a template for a look, rather than to keep, has to be able to put
+    it back, and a person who learns a bad one should be able to remove it.
+
+    Only the derived range can be deleted. The corpus templates are evidence and are not
+    ours to remove at runtime.
+
+    A template whose folder has already gone can still be *live in memory*: the registry
+    caches what it loaded, so an entry whose directory was removed without a reload keeps
+    being matched against uploads while this refused to delete it -- a phantom template,
+    influencing every reading and removable only by restarting the server. Found exactly
+    that (a stale T51) during the 2026-09-11 stabilisation pass. Reloading clears it,
+    because `load()` rebuilds the map from disk.
+    """
+    folder = DERIVED_ROOT / template_id
+    if not folder.is_dir():
+        # A phantom has no folder under *any* root. Testing only the derived root would
+        # report a corpus template as released: those live elsewhere on disk and are not
+        # ours to remove, which is the whole point of the check above.
+        on_disk = any((root / template_id).is_dir() for root in TEMPLATE_ROOTS)
+        known = any(t.template_id == template_id for t in registry.all())
+        if known and not on_disk:
+            registry.load()
+            return True
+        return False
+    shutil.rmtree(folder)
+    registry.load()
+    return True
 
 
 class TemplateRegistry:
