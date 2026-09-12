@@ -50,6 +50,25 @@ class TemplateField(BaseModel):
     label: str
     field_type: FieldType
     bbox: BoundingBox
+    # The point size the form was actually filled at in this region, recovered when the
+    # template was learned by asking what size reproduces the width the text really
+    # occupied. Regeneration uses it directly. Sizing from the *box* instead is a guess,
+    # and on a ruled field the box is the whole writable band, so the guess ran wide and
+    # pushed every value off-centre by an amount that grew with its length. Width is the
+    # thing measured, not height: a word's height depends on whether it happens to
+    # contain an ascender or a descender, its width does not. ``None`` on templates
+    # learned before this existed, and on fields blank when the template was learned.
+    # Stored as a fraction of page height, never as points: a derived template's page
+    # is measured in the pixels of the render it was learned from (1275x1650 for a
+    # 150dpi letter page), not in the 612x792 points of the original PDF, so a size in
+    # absolute units means different things on the two and comparing them directly is
+    # how this was misdiagnosed in the first place.
+    font_size: float | None = Field(default=None, gt=0, le=1)
+    # How far in from the left of this region the text actually started, as a fraction of
+    # page width. Measured rather than assumed: how far a form is filled in from its rule
+    # differs between forms, and picking any single constant fits whichever form it was
+    # chosen against and misplaces the others.
+    text_indent: float | None = Field(default=None, ge=0, le=1)
     required: bool = False
     expected_content: str = "printed_or_handwritten"
     normalizer: str | None = None

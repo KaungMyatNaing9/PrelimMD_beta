@@ -43,11 +43,68 @@ def _descent(fontname: str) -> float:
 
 
 FONT = "helv"
+# A value starts a little in from where its rule does, rather than hard against it. Scaled
+# to the text, not a fixed number of page units: a derived template's page is measured in
+# the pixels of the render it was learned from, so a constant "2" meant 2px there and 2pt
+# on a template stored in points -- a third of a millimetre in one and over one in the
+# other, which showed up as a systematic leftward bias on exactly one of the two.
+INDENT_EM = 0.35
 
 
-def _font_size(height_pt: float) -> float:
-    """Fit the face to the field box, clamped to a legible range."""
+def _indent(field, size: float, page_width: float) -> float:
+    """Where in the region to start the text: as measured, or a small default."""
+    if field.text_indent is not None:
+        return field.text_indent * page_width
+    return size * INDENT_EM
+
+
+def _font_size(height_pt: float, learned: float | None = None) -> float:
+    """The size to redraw a value at: the one the form was filled at, where that is known.
+
+    Deriving it from the *box* is a guess, and on a ruled field the box is the whole
+    writable band, so the guess saturated at the 12pt ceiling on a form actually filled
+    at 11pt. A run drawn 9% too wide carries its own centre half that excess to the
+    right, which is why the placement error grew with the length of the value -- 2mm on
+    a zip code, 14mm on an email address. The box-derived guess remains the fallback for
+    a template learned from a blank form, where there is no filled text to measure.
+    """
+    if learned:
+        return learned
     return max(6.0, min(12.0, height_pt * 0.55))
+
+
+def unplaced(
+    template: TemplateDefinition, values: dict[str, Any], page_index: int = 0
+) -> list[str]:
+    """Values that were read but have nowhere on this template to go.
+
+    A template only carries the fields its form was seen to have. Where a form combines
+    two in one caption -- "City/State" is one region on a real registration form -- the
+    slot is named after the pair and no single canonical value matches it, so a correctly
+    read city is dropped on the way out. It was dropped *silently*, which is the part worth
+    fixing: everywhere else this system reports what it could not do rather than quietly
+    doing less, and a regenerated form missing a value a person can see on the original is
+    exactly the kind of thing that has to be said out loud.
+    """
+    slots = {
+        CORPUS_KEY_ALIASES.get(f.field_id, f.field_id) for f in template.pages[page_index].fields
+    }
+    missing: dict[str, str] = {}
+    for key, value in values.items():
+        if key in slots:
+            continue
+        text = _text_for(value, FieldType.SHORT_TEXT)
+        # "( )" is an empty phone rule, not an answer. Nothing was lost by not placing it,
+        # and listing it would bury the values that were.
+        if text is None or not any(c.isalnum() for c in text):
+            continue
+        # ``values_from_analysis`` files each value under both its canonical key and one
+        # derived from its printed label, so an unplaced value would otherwise be named
+        # twice. The canonical key is the one worth reporting.
+        seen = missing.get(text)
+        if seen is None or ("." in key and "." not in seen):
+            missing[text] = key
+    return sorted(set(missing.values()))
 
 
 def regenerate(
@@ -56,7 +113,8 @@ def regenerate(
     """Render ``values`` onto the blank master for ``template`` and return PDF bytes.
 
     ``values`` is keyed by canonical field key; template fields carry the corpus key, so
-    they are translated through CORPUS_KEY_ALIASES on the way in.
+    they are translated through CORPUS_KEY_ALIASES on the way in. Values with no slot are
+    not rendered; ``unplaced`` names them so a caller can say so.
     """
     blank = canonical_image_path(template.template_id)
     if not blank.exists():
@@ -81,7 +139,7 @@ def regenerate(
             (box.x + box.width) * width,
             (box.y + box.height) * height,
         )
-        size = _font_size(rect.height)
+        size = _font_size(rect.height, (field.font_size or 0) * height or None)
         if "\n" in text:
             # A multi-line value needs the whole region and grows downwards from its top.
             page.insert_textbox(
@@ -100,7 +158,7 @@ def regenerate(
         # the value back on the rule. Shrinking the box instead silently renders nothing
         # when the text no longer fits.
         page.insert_text(
-            fitz.Point(rect.x0 + 2, rect.y1 - size * _descent(FONT)),
+            fitz.Point(rect.x0 + _indent(field, size, width), rect.y1 - size * _descent(FONT)),
             text,
             fontsize=size,
             fontname=FONT,

@@ -8,12 +8,25 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "fastapi>=0.115,<1", "uvicorn>=0.30,<1", "pydantic>=2.9,<3",
-  "python-multipart>=0.0.12,<1", "pydantic-settings>=2.5,<3", "pillow>=10.4,<12", "numpy>=2,<3",
+  "python-multipart>=0.0.12,<1", "pydantic-settings>=2.5,<3", "pillow>=10.4,<13", "numpy>=2,<3",
   "opencv-python>=4.10,<5", "pytesseract>=0.3.13,<1", "pymupdf>=1.28,<2"
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.6,<1", "mypy>=1.11,<2"]
+# PaddleOCR-VL reads handwriting far better than Tesseract and is Apache 2.0, so unlike
+# the other strong candidates it could ship. It is optional because on CPU it costs
+# 250-385s a page, which no live demo can spend -- see docs/PROGRESS.md. Install it to
+# read a backlog accurately offline, or on a machine with a GPU.
+handwriting = ["paddlepaddle>=3.3,<4", "paddleocr>=3.7,<4", "paddlex[ocr]>=3.7,<4"]
+# HEIC is the iPhone default photo format, so it is the likeliest thing a patient
+# photographing a form will send. Optional because the decoder carries libheif and a
+# deployment that never sees one should not have to; without it a HEIC upload is refused
+# with an error that says exactly what to do, rather than "corrupted file".
+heic = ["pillow-heif>=1.0,<2"]
+# The audit trail runs on SQLite with nothing installed. This moves the same rows to the
+# PostgreSQL that docker-compose already defines, for a deployment that wants a server.
+postgres = ["psycopg[binary]>=3.1,<4"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -7,10 +7,10 @@ from app.services.fhir import to_questionnaire_response
 
 
 def _field(**over):
-    base = dict(
-        field_id="box_1", label_text="Date of Birth", canonical_key="patient.date_of_birth",
-        field_type=FieldType.DATE, normalized_value="04/17/1986", needs_review=False,
-    )
+    base = {
+        "field_id": "box_1", "label_text": "Date of Birth", "canonical_key": "patient.date_of_birth",
+        "field_type": FieldType.DATE, "normalized_value": "04/17/1986", "needs_review": False,
+    }
     return SimpleNamespace(**{**base, **over})
 
 
@@ -73,3 +73,38 @@ def test_no_loinc_code_is_invented():
     because a wrong code would be believed by whatever receives it."""
     r = to_questionnaire_response(_analysis(_field()))
     assert "code" not in r["item"][0]
+
+
+def test_a_model_overruling_geometry_is_recorded_as_a_disagreement():
+    """The disputed signal fired 0 times in 118 fields because every real conflict was
+    resolved here, where geometry had read something, doubted it, and been overruled --
+    and that was filed as "unread", which is what a field only one reader saw looks like."""
+    from app.schemas.form_understanding import DetectedFormField
+    from app.schemas.models import BoundingBox, FieldType
+    from app.services.fusion import _adopt
+
+    box = BoundingBox(x=0.1, y=0.1, width=0.2, height=0.05)
+    def field(value):
+        return DetectedFormField(
+            field_id="f1", page_index=0, label_text="Zip Code", normalized_label="zip code",
+            field_type=FieldType.SHORT_TEXT, label_bbox=box, answer_bbox=box,
+            required_confidence=0.3, detection_confidence=0.9, source="ocr_layout",
+            mapping_confidence=0.9, mapping_reason="alias", raw_value=value,
+            normalized_value=value, is_blank=value is None, confidence=0.5,
+        )
+
+    # Geometry read something and is overruled: the readers conflict.
+    conflicted = field("15206")
+    _adopt(conflicted, "45206")
+    assert conflicted.agreement == "disputed"
+    assert conflicted.needs_review
+
+    # Geometry read nothing: nobody contradicted anybody.
+    filled = field(None)
+    _adopt(filled, "15206")
+    assert filled.agreement == "unread"
+
+    # The same value written differently is not a conflict.
+    agreed = field("04/17/1986")
+    _adopt(agreed, "04 / 17 / 1986")
+    assert agreed.agreement == "unread"

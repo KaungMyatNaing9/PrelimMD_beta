@@ -8,14 +8,14 @@ from app.schemas.models import BoundingBox, FieldType
 
 def _field(**over):
     box = BoundingBox(x=0.1, y=0.1, width=0.2, height=0.05)
-    base = dict(
-        field_id="f1", page_index=0, label_text="Home Phone",
-        normalized_label="home phone", field_type=FieldType.PHONE,
-        label_bbox=box, answer_bbox=box, required_confidence=0.3,
-        detection_confidence=0.9, source="ocr_layout", mapping_confidence=0.9,
-        mapping_reason="alias", raw_value="312-555-0109",
-        normalized_value="312-555-0109", is_blank=False, confidence=0.82,
-    )
+    base = {
+        "field_id": "f1", "page_index": 0, "label_text": "Home Phone",
+        "normalized_label": "home phone", "field_type": FieldType.PHONE,
+        "label_bbox": box, "answer_bbox": box, "required_confidence": 0.3,
+        "detection_confidence": 0.9, "source": "ocr_layout", "mapping_confidence": 0.9,
+        "mapping_reason": "alias", "raw_value": "312-555-0109",
+        "normalized_value": "312-555-0109", "is_blank": False, "confidence": 0.82,
+    }
     return DetectedFormField(**{**base, **over})
 
 
@@ -85,3 +85,17 @@ def test_history_survives_serialisation():
     again = DetectedFormField.model_validate_json(field.model_dump_json())
     assert again.history[0].value == "312-555-0109"
     assert again.history[0].confidence == 0.82
+
+
+def test_an_attestation_says_the_signer_was_never_authenticated():
+    """Nothing authenticates a reviewer today -- a name is typed into a box. A record
+    reading "signed by M. Thiha" implies a check that did not happen, and in an audit trail
+    that implication is the dangerous part."""
+    from datetime import UTC, datetime
+
+    from app.schemas.form_understanding import Attestation
+
+    signed = Attestation(
+        signed_by="M. Thiha", signed_at=datetime.now(UTC), covers="abc123"
+    )
+    assert signed.identity == "unverified"

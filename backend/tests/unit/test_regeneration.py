@@ -150,3 +150,35 @@ def test_a_multi_line_value_starts_at_the_top_and_grows_down(template):
     assert first[0].y0 < second[0].y0, "lines are out of order"
     assert first[0].y0 - rect.y0 < rect.height * 0.5, "first line did not start near the top"
     assert rect.contains(second[0]), f"{second[0]} escaped its field {rect}"
+
+
+def test_a_value_with_nowhere_to_go_is_named_rather_than_dropped():
+    """A template only carries the fields its form was seen to have. One real registration
+    form captions a single region "City/State", so a correctly read city matches no slot
+    and never reaches the copy -- silently, until now."""
+    from app.schemas.models import (
+        BoundingBox,
+        FieldType,
+        TemplateDefinition,
+        TemplateField,
+        TemplatePage,
+    )
+    from app.services.regeneration import unplaced
+
+    box = BoundingBox(x=0.1, y=0.1, width=0.2, height=0.03)
+    template = TemplateDefinition(
+        template_id="T50", template_name="derived", version=1, page_count=1,
+        pages=[TemplatePage(page_index=0, canonical_width=612, canonical_height=792, fields=[
+            TemplateField(field_id="patient.last_name", label="Last Name",
+                          field_type=FieldType.SHORT_TEXT, bbox=box, review_threshold=0.75),
+            TemplateField(field_id="city_state", label="City/State",
+                          field_type=FieldType.SHORT_TEXT, bbox=box, review_threshold=0.75),
+        ])],
+    )
+    missing = unplaced(template, {
+        "patient.last_name": "Okonkwo",      # has a slot
+        "patient.city": "Greensboro",        # has none
+        "city": "Greensboro",                # the same value under its label key
+        "patient.home_phone": "( )",         # an empty rule, not an answer
+    })
+    assert missing == ["patient.city"]
