@@ -1399,3 +1399,24 @@ path has been benchmarked alone and reported as if it were the product.
   vision figure.
 - Never run two benchmarks against a vision-enabled server at once -- concurrency forces the
   rate limit, so both runs mix readers and neither measures what it claims.
+
+
+## The handwriting benchmark has a 10-point spread (2026-09-11)
+
+Found by accident. A prompting change scored 42.9% before and 42.9% after -- a clean null
+result -- until the *reverted* code, identical to the baseline, scored 53.1%.
+
+Five runs, same code, same five photographs, same local model:
+**42.9%, 42.9%, 53.1%, 53.1%, 53.1%** (21 vs 26 of 49 fields).
+
+- The **51.0%** this document has been quoting is one sample from a noisy distribution.
+- No experiment on 49 fields can resolve an effect smaller than the spread.
+- **Gate 3's >= 80% cannot be demonstrated on this set**, even by a run that reaches it.
+
+The model is non-deterministic at `temperature: 0`, and the census is consistent with that:
+11 of 23 failures are fields never returned at all, which is what a tiling or retry path
+branching differently between runs looks like.
+
+Also closed: structured-output enforcement was already implemented -- every provider
+constrains decoding to the JSON schema -- which is why moving the prompt to a system role
+could not have helped for the reason it was tried.
