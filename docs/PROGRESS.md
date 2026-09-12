@@ -1446,12 +1446,16 @@ it. No human enrols anything.
 | **hybrid + self-templating** | **84.1%** |
 
 +6.4 on the geometric path, +3.1 on top of vision, no form regressed in twenty
-measurements -- **but treat this as unconfirmed.**
+measurements -- **reproduced, and smaller than that.**
 
-The same technique on FUNSD: **+3.0 on ten forms, -1.0 on all fifty** (41.5% -> 40.5%, 42
-templates derived). Ten forms produced a false positive of the same size and sign as the
-intake result, which rests on 63 fields. Until intake is reproduced on a larger set, the
-honest position is that self-templating is **unproven**, not proven.
+TEST2, an independent 69-field set sharing no forms with TEST4: 79.7% -> 81.2%, one field.
+Across both sets, **5 fields gained of 132, none lost across twenty forms**. Consistent
+direction, modest size.
+
+On FUNSD it is *negative*: +3.0 on ten forms but **-1.0 on all fifty** (41.5% -> 40.5%), with
+answer arrival falling from ~60% to 55.3%. Ten forms manufactured a false positive of the
+same size and sign as the intake result, which is why the intake number needed a second set
+before it could be believed.
 
 Under self-templating FUNSD's answer-arrival rate *fell* (~60% -> 55.3%), so on noisy
 scans the derived template is actively worse than no template. Intake forms are clean
