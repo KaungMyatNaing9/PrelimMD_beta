@@ -896,6 +896,26 @@ def _is_a_caption(value: str) -> bool:
     return bool(stripped) and norm(stripped) in known_captions()
 
 
+def _is_letterhead(label: str) -> bool:
+    """A caption of a single letter is the clinic's own contact block, not a field.
+
+    **Not currently applied.** Wired into `_blank_furniture` on 2026-09-13 and withdrawn the
+    same night: TEST4 fell 60.3% -> 52.4% and TEST5 59.7% -> 55.2% in the run that added it,
+    and whether that was the rule or ordinary run-to-run movement could not be established --
+    Groq was stalling on image requests and the local model needs ~60s a page, so the three
+    repeats that would have settled it were unaffordable. Kept, with its tests, because the
+    offline evidence is good (11 of 137 false values, none of 49 real captions) and the only
+    thing missing is a measurement. Re-apply when a vision run is cheap enough to repeat.
+
+    Forms print their practice's phone and fax as "P: 562-340-0607" and "F: 562-340-0606",
+    and the reader binds `P` and `F` as captions owning those numbers -- so the clinic's
+    switchboard is reported as a patient's answer. Measured over 137 false values this
+    removes 11 and costs none of 49 real captions; two letters would also condemn `MI`, a
+    real field, so one letter is the boundary.
+    """
+    return len(re.sub(r"[^A-Za-z]", "", label or "")) <= 1
+
+
 def _blank_furniture(fields: list[DetectedFormField]) -> None:
     """Clear values that are the form's own printing, once a reading has already won.
 

@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     # a server without changing any of them.
     database_url: str = ""
     # "disabled" | "ollama" (local, free, no data egress) | "anthropic" (paid API)
-    vision_provider: str = "disabled"
+    # Local by default (user, 2026-09-13). The hybrid is worth +2.9 / +15.9 / +9.0 points
+    # on TEST2, TEST4 and TEST5, and raises precision as well as recall (45.6% -> 47.9%),
+    # so shipping it off meant shipping the fallback. `ollama` rather than a hosted
+    # provider because no page leaves the machine and it needs no API key; a vision failure
+    # is caught in `_analyze_image` and the geometric reading stands, so an install without
+    # Ollama degrades to the previous behaviour rather than breaking.
+    vision_provider: str = "ollama"
     ocr_engine: str = "tesseract"
     vision_model: str = ""
     vision_api_key: str = ""

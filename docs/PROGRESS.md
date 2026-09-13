@@ -1636,3 +1636,48 @@ strongest argument yet for quoting a range across sets rather than a single head
 for why single-set results have been so unreliable.
 
 `TEST5` is in `make bench` and in the precision measure, so it cannot be skipped.
+
+
+## Vision is the default now (2026-09-13)
+
+`vision_provider` shipped as `disabled`, so every install ran the geometric fallback and
+every figure this project published measured it. Three unseen sets say what that cost:
+
+| set | geometry | hybrid |
+|---|---|---|
+| TEST2 | 72.5% | 75.4% |
+| TEST4 | 44.4% | 60.3% |
+| TEST5 | 50.7% | 59.7% |
+
+and precision rises too, 45.6% -> 47.9%, so the hybrid does not merely find more values, it
+invents fewer.
+
+The default is **`ollama`**: local, free, no API key, no page leaving the machine -- the
+right posture for patient data. A vision failure is already caught in `_analyze_image` and
+the geometric reading stands with a warning, so an install without Ollama degrades to the
+previous behaviour rather than breaking. The cost is about 60s a page against a few seconds
+for Tesseract alone, which is why the setting stays a setting.
+
+
+## A rule withdrawn for want of a measurement (2026-09-13)
+
+A caption of a single letter is the practice's own contact block -- forms print `P:` and
+`F:` above their phone and fax, and the reader binds those as captions owning the numbers,
+so the clinic's switchboard is reported as a patient's answer. Offline the rule looked free:
+11 of 137 false values removed, none of 49 real captions touched.
+
+End to end it was not. In the run that added it TEST4 fell 60.3% -> 52.4% and TEST5 59.7%
+-> 55.2%, and **whether that was the rule or ordinary movement could not be established**:
+Groq had begun stalling on image requests, and the local model needs about 60s a page, so
+the three repeats that would have settled it were unaffordable that night.
+
+Withdrawn from the live path, kept as code and tests with the reason recorded. The lesson
+is the placement of the evidence, not the idea: an offline count over a saved census is not
+an end-to-end measurement, and a rule that changes what the pipeline emits has to be judged
+the second way.
+
+**Two operational notes.** Uvicorn is single-worker, so one stalled vision request hangs the
+health endpoint too -- a run showing zero pages and a health check timing out is a blocked
+upstream, not a broken benchmark. And the cost asymmetry now drives what is measurable:
+geometry-only runs are seconds and deterministic, vision runs are ~60s a page locally, so
+anything needing repeats needs a working hosted provider.
