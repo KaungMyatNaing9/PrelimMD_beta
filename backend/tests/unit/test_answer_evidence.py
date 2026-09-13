@@ -200,3 +200,20 @@ class TestTheValueIsTheNextCaption:
 
         for value in ["Amara", "PA", "04/17/1986", "Riverside Logistics", "Pittsburgh"]:
             assert not _is_a_caption(value), value
+
+
+class TestLetterheadIsNotAField:
+    """`P:` and `F:` on a form are the practice's phone and fax, not questions."""
+
+    def test_single_letter_captions_are_letterhead(self):
+        from app.services.form_analyzer import _is_letterhead
+
+        for label in ["P", "F", "T", "@", "P:"]:
+            assert _is_letterhead(label), label
+
+    def test_two_letter_fields_survive(self):
+        from app.services.form_analyzer import _is_letterhead
+
+        # `MI` is a real field -- middle initial -- on the benchmark forms.
+        for label in ["MI", "DOB", "Last Name", "SSN"]:
+            assert not _is_letterhead(label), label
