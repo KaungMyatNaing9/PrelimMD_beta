@@ -1548,3 +1548,31 @@ Research note: since 2023 the field has moved to emitting tables as HTML or Mark
 sequences from a single vision pass, rather than recovering cells and then pairing them
 (Docling, UniTabNet, InstructTable). Our prompt asks for flat label/value pairs, which
 cannot express a column header owning six cells however well the model reads them.
+
+
+## Table support: +10.7 on FUNSD, harmful on intake (2026-09-13)
+
+A FUNSD page with 41 annotated pairs returned **6 fields and no table cell at all**. The
+prompt asked for a flat list of label/value pairs, which cannot say that one caption heads
+six cells however well the model reads them -- the field has emitted tables as structured
+sequences since 2023 for exactly this reason. Asking for `tables` as a grid and flattening
+each filled cell into a field under its column caption took that page from 6 fields to 26,
+and FUNSD from **41.5% to 52.2%** (table cells 20.4% -> 39.8%, answers arriving 61.0% ->
+72.7%). Largest pipeline gain measured on FUNSD by an order of magnitude.
+
+It does not transfer. Matched trio, same local model, same forms:
+
+| configuration | TEST2 | TEST4 | precision |
+|---|---|---|---|
+| geometry only | 72.5% | 44.4% | 45.6% |
+| **vision, tables off** | **75.4%** | **54.0%** | **47.9%** |
+| vision, tables on | 73.9% | 54.0% | **38.4%** |
+
+**Precision falls 9.5 points** -- about forty more false values -- for no recall gain. On a
+form with no table, asking for tables invents one. `VISION_TABLES` is off by default and
+should stay off until a clinic form with real grids says otherwise; medication lists and
+family-history grids are the cases that might.
+
+**Vision improves precision as well as recall** (45.6% -> 47.9%), measured here on the local
+7B model, which independently confirms the earlier Groq result on a different model. It does
+not merely find more values, it invents fewer.
