@@ -47,7 +47,7 @@ def main() -> int:
     args = parser.parse_args()
 
     grand_truth = grand_valued = grand_good = 0
-    for name in args.sets or ["TEST2", "TEST4"]:
+    for name in args.sets or ["TEST2", "TEST4", "TEST5"]:
         folder = FORMS / name
         truth = truth_for(folder)
         if not truth:

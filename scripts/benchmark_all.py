@@ -65,7 +65,7 @@ def main() -> int:
     print("dev forms (regression check only -- tuned against, not evidence)", flush=True)
     rows.append(("dev forms", find(run("evaluate_real_forms.py", "--api", args.api),
                                    r"ACCURACY .*= ([\d.]+%)"), "recall"))
-    for name in ("TEST2", "TEST4"):
+    for name in ("TEST2", "TEST4", "TEST5"):
         print(f"{name} recall", flush=True)
         rows.append((f"{name} zero-shot",
                      find(run("evaluate_real_forms.py", "--api", args.api,
