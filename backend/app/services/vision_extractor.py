@@ -15,6 +15,7 @@ machine, which matters more than cost for anything resembling patient data.
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -144,6 +145,71 @@ def available() -> bool:
     return settings.vision_provider not in ("", "disabled")
 
 
+# A content-addressed cache of model readings, for measurement rather than production.
+#
+# Every pipeline experiment this week was judged through a non-deterministic model, so a
+# five-point pipeline change and eight points of model noise looked the same. That is what
+# left the letterhead rule unresolved. With the cache on, a baseline and a variant are shown
+# *identical* model output, so any difference between them is the pipeline change and
+# nothing else -- and a repeat run costs no model calls at all.
+#
+# Off by default: a cached reading is a stale reading, and production must always ask the
+# model. Keyed by the image's bytes, the provider, the model and the prompt, so changing any
+# of those is a different key rather than a wrong hit.
+_LOG = logging.getLogger(__name__)
+
+CACHE = os.getenv("VISION_CACHE", "") == "1"
+CACHE_DIR = Path(os.getenv("VISION_CACHE_DIR", "") or (Path.home() / ".cache" / "prelimmd-vision"))
+
+
+def _cache_key(image: Path, provider: str) -> str:
+    material = hashlib.sha256(image.read_bytes()).hexdigest()
+    model = settings.vision_model or ""
+    recipe = f"{provider}|{model}|{TILE_GRID}|{TABLES}|{hashlib.sha256(PROMPT.encode()).hexdigest()[:16]}"
+    return hashlib.sha256(f"{material}|{recipe}".encode()).hexdigest()
+
+
+def _cache_read(image: Path, provider: str) -> dict | None:
+    if not CACHE:
+        return None
+    key = _cache_key(image, provider)
+    path = CACHE_DIR / f"{key}.json"
+    try:
+        found = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("vision cache MISS %s %s", key[:12], image.name)
+        return None
+    _LOG.warning("vision cache hit  %s %s", key[:12], image.name)
+    return found
+
+
+def _cache_write(image: Path, provider: str, raw: dict) -> None:
+    if not CACHE or not raw:
+        return
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (CACHE_DIR / f"{_cache_key(image, provider)}.json").write_text(json.dumps(raw))
+    except OSError:
+        # A cache that cannot be written is a slow run, never a failed one.
+        pass
+
+
+def _fields_from(raw: dict) -> list[VisionField]:
+    """The model's reply as fields, including a table's cells when those are asked for."""
+    fields = [
+        VisionField(
+            label=str(f.get("label", "")).strip(),
+            value=(str(f["value"]).strip() or None) if f.get("value") is not None else None,
+            handwritten=bool(f.get("handwritten")),
+        )
+        for f in raw.get("fields", [])
+        if str(f.get("label", "")).strip()
+    ]
+    if TABLES:
+        fields += _cells_as_fields(raw.get("tables") or [])
+    return fields
+
+
 def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
     """Read label/value pairs off a form image using the configured provider.
 
@@ -164,6 +230,10 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
         call = _with_local_fallback
     else:
         raise HTTPException(503, f"Unknown VISION_PROVIDER {provider!r}")
+
+    cached = _cache_read(image, provider)
+    if cached is not None:
+        return _fields_from(cached)
 
     if TILE_GRID > 1:
         # EXPERIMENT: read every page in enlarged pieces, not only the ones that failed.
@@ -202,17 +272,8 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
             if expect_answers and not raw.get("fields"):
                 raw = _read_in_pieces(image, call) or raw
 
-    fields = [
-        VisionField(
-            label=str(f.get("label", "")).strip(),
-            value=(str(f["value"]).strip() or None) if f.get("value") is not None else None,
-            handwritten=bool(f.get("handwritten")),
-        )
-        for f in raw.get("fields", [])
-        if str(f.get("label", "")).strip()
-    ]
-    if TABLES:
-        fields += _cells_as_fields(raw.get("tables") or [])
+    _cache_write(image, provider, raw)
+    fields = _fields_from(raw)
     if raw.get("truncated"):
         # A partial read must not look like a complete one.
         raise VisionTruncated(

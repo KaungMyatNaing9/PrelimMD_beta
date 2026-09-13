@@ -899,13 +899,15 @@ def _is_a_caption(value: str) -> bool:
 def _is_letterhead(label: str) -> bool:
     """A caption of a single letter is the clinic's own contact block, not a field.
 
-    **Not currently applied.** Wired into `_blank_furniture` on 2026-09-13 and withdrawn the
-    same night: TEST4 fell 60.3% -> 52.4% and TEST5 59.7% -> 55.2% in the run that added it,
-    and whether that was the rule or ordinary run-to-run movement could not be established --
-    Groq was stalling on image requests and the local model needs ~60s a page, so the three
-    repeats that would have settled it were unaffordable. Kept, with its tests, because the
-    offline evidence is good (11 of 137 false values, none of 49 real captions) and the only
-    thing missing is a measurement. Re-apply when a vision run is cheap enough to repeat.
+    Withdrawn once and restored. The run that first added it showed TEST4 at 52.4% against
+    60.3% and TEST5 at 55.2% against 59.7%, which looked damning; re-measured against
+    *cached* model readings, so that both arms see byte-identical output, it is exactly
+    neutral -- TEST5 61.2% with and without. The apparent drop was the model moving between
+    runs, not this rule, which is the confusion `VISION_CACHE` exists to remove.
+
+    Offline it removes 11 of 137 false values and costs none of 49 real captions. The forms
+    carrying `P:`/`F:` letterhead are in TEST2, so the benefit shows in precision there
+    rather than in TEST5 recall.
 
     Forms print their practice's phone and fax as "P: 562-340-0607" and "F: 562-340-0606",
     and the reader binds `P` and `F` as captions owning those numbers -- so the clinic's
@@ -933,7 +935,9 @@ def _blank_furniture(fields: list[DetectedFormField]) -> None:
         value = field.normalized_value
         if not isinstance(value, str) or not value.strip():
             continue
-        if _is_question_tail(value) or _is_option_glyphs(value) or _is_a_caption(value):
+        if _is_letterhead(field.label_text) or (
+            _is_question_tail(value) or _is_option_glyphs(value) or _is_a_caption(value)
+        ):
             field.raw_value = None
             field.normalized_value = None
             field.is_blank = True

@@ -156,7 +156,11 @@ def fuse(
             # for want of a position is the most expensive kind of loss -- the hard part
             # succeeded and the bookkeeping lost it -- and until now nothing said how often
             # it happened.
-            _LOG.info("fusion: dropped unplaceable value for %r", field.label)
+            # `warning`, not `info`: nothing configures logging in this application, so
+            # the root logger sits at WARNING and an info line reaches no handler at all.
+            # This was first written as info, and the resulting silence was read as "no
+            # values are ever dropped" -- a conclusion drawn from an unemitted log line.
+            _LOG.warning("fusion: dropped unplaceable value for %r", field.label)
             continue
         # Guarding only the fields geometry already had left the hole this closes: a
         # question geometry never produced -- "Sex", "Marital Status" -- arrived through

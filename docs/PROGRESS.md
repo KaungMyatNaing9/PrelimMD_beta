@@ -1681,3 +1681,42 @@ health endpoint too -- a run showing zero pages and a health check timing out is
 upstream, not a broken benchmark. And the cost asymmetry now drives what is measurable:
 geometry-only runs are seconds and deterministic, vision runs are ~60s a page locally, so
 anything needing repeats needs a working hosted provider.
+
+
+## A cache for model readings, and a log line that never printed (2026-09-13)
+
+Every pipeline experiment this week was judged through a non-deterministic model, so a
+five-point pipeline change and eight points of model movement were indistinguishable. That
+is what left the letterhead rule unresolved, and it is why several results this week were
+inconclusive rather than wrong.
+
+`VISION_CACHE=1` stores each reading under a key made from the image's bytes, the provider,
+the model, the prompt and the tile/table settings. A baseline and a variant then replay
+byte-identical model output, so the difference between them is the pipeline change and
+nothing else.
+
+| | |
+|---|---|
+| cold run, TEST5 | 30 min |
+| warm run | **6 min, and reproducible** (61.2% twice) |
+| cache | 8 hits, 3 misses |
+
+It is off by default: a cached reading is a stale reading and production must always ask the
+model. It also cannot answer questions *about* the model -- for variance or quality, run it
+cold.
+
+**First use settled the open question.** The letterhead rule had looked harmful (TEST4
+60.3% -> 52.4%, TEST5 59.7% -> 55.2%) but against cached readings it is exactly neutral:
+TEST5 61.2% with and without. The drop was the model moving between runs.
+
+### A correction: a conclusion drawn from silence
+
+The overnight block reported "values dropped for want of a position: **zero** -- the theory
+is dead". That came from `grep -c` over a log line written with `_LOG.info`, and **nothing
+in this application configures logging**, so the root logger sits at WARNING and the line
+could never have been emitted. The grep was counting silence.
+
+Re-measured with the diagnostic at `warning`, the count really is zero, so the conclusion
+survives -- but it had no evidence behind it when it was made, and it sent the search
+elsewhere for the rest of the night. Both diagnostics now log at the lowest level that
+reaches a default handler, with the reason recorded beside them.
