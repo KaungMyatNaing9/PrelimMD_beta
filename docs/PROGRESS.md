@@ -1726,3 +1726,34 @@ Re-measured with the diagnostic at `warning`, the count really is zero, so the c
 survives -- but it had no evidence behind it when it was made, and it sent the search
 elsewhere for the rest of the night. Both diagnostics now log at the lowest level that
 reaches a default handler, with the reason recorded beside them.
+
+
+## Auditing the cache, because a hundredfold is suspicious (2026-09-13)
+
+Checked rather than trusted.
+
+**Faithfulness.** The same form read through the cache and read fresh with the cache off
+returns the *same 272 lines* of label, value and source -- identical field for field, not
+merely a matching total.
+
+**Keys.** Ten entries, ten distinct keys, no collisions. Seven successes and three failure
+sentinels, and the only identical payloads are those three sentinels.
+
+**Arithmetic.** The three failures are 120-second timeouts -- "the local model did not
+answer within 120s" -- and each one also buys a tiling retry of four more calls. Three
+timeouts, their retries, and seven pages at 60-120s apiece is the thirty minutes. Remove
+every model call and what remains is OCR and geometry at well under a second a page, which
+is the eighteen. Nothing is skipped that was not already being paid for.
+
+### What it cannot do
+
+The cache makes a measurement **repeatable**, never more accurate. It replays one particular
+draw, so if that draw was lucky every later A/B is anchored to the luck. Use it for "did my
+pipeline change help"; take headline accuracy from cold runs.
+
+### A separate finding: three TEST5 pages are never read
+
+Those timeouts are not a cache artefact. Three pages of TEST5 defeat the local model on
+every run, cached or not, and the reported hybrid figure stands with them blank. A faster
+local model, or a longer timeout, would be measuring something different from what is
+reported today.
