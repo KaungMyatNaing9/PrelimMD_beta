@@ -73,11 +73,37 @@ Rules:
 - Only return an empty list if the page is completely unfilled. If you can see even one
   answer, the list must not be empty.
 
-Respond with JSON only: {"fields": [{"label": ..., "value": ..., "handwritten": ...}]}"""
+If the page contains a TABLE -- a grid where one caption heads a whole column of cells --
+put it in "tables" instead of "fields". Give the column captions once, then one entry per
+row. A column caption belongs to every cell beneath it.
+
+Respond with JSON only:
+{"fields": [{"label": ..., "value": ..., "handwritten": ...}],
+ "tables": [{"columns": [...], "rows": [[...], [...]]}]}"""
 
 SCHEMA = {
     "type": "object",
     "properties": {
+        # A table is asked for as a grid, not as a flat list of pairs, because a flat list
+        # cannot say that one caption heads six cells -- and measured on a FUNSD form with
+        # 41 annotated pairs the model returned 6 fields and no table cell at all. 38.5% of
+        # that split's links hang off a column header, where this pipeline scores 20.4%
+        # against 70.7% on ordinary fields. The field has emitted tables as structured
+        # sequences since 2023 (Docling, UniTabNet) for the same reason.
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "columns": {"type": "array", "items": {"type": "string"}},
+                    "rows": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": ["string", "null"]}},
+                    },
+                },
+                "required": ["columns", "rows"],
+            },
+        },
         "fields": {
             "type": "array",
             "items": {
@@ -185,6 +211,8 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
         for f in raw.get("fields", [])
         if str(f.get("label", "")).strip()
     ]
+    if TABLES:
+        fields += _cells_as_fields(raw.get("tables") or [])
     if raw.get("truncated"):
         # A partial read must not look like a complete one.
         raise VisionTruncated(
@@ -202,6 +230,12 @@ MAX_EDGE_PIXELS = 1600
 # EXPERIMENT (2026-09-12): force every page into a grid of enlarged pieces. 0 or 1 keeps
 # the shipped behaviour, where pieces are only asked for after the whole page has failed.
 TILE_GRID = int(os.getenv("VISION_TILE_GRID", "0") or 0)
+
+# Whether a table's cells become fields. On FUNSD this is worth +10.7 points (41.5% ->
+# 52.2%, table cells 20.4% -> 39.8%), but FUNSD is half tabular and intake forms are not,
+# so it stays off until it is shown to help clinic forms -- medication lists and
+# family-history grids are the cases that would.
+TABLES = os.getenv("VISION_TABLES", "") == "1"
 
 
 def _encoded(image: Path) -> str:
@@ -613,6 +647,33 @@ def _best_cluster(candidates: list[Word], wanted: str) -> list[Word] | None:
 
 def _normalize(text: str) -> str:
     return "".join(c for c in text.lower() if c.isalnum())
+
+
+def _cells_as_fields(tables: list[dict]) -> list[VisionField]:
+    """Flatten a table into one field per filled cell, captioned by its column.
+
+    A column header owns every cell beneath it, so each cell becomes its own field under
+    that caption -- six cells under `VOLUME` are six fields labelled `VOLUME`, not one. The
+    rest of the pipeline keys readings by position rather than by caption, so repeats no
+    longer collide.
+
+    Blank cells are skipped: the contract of the read is that a listed field was answered,
+    and a table's empty cells would otherwise flood the page with fields nobody filled in.
+    """
+    made: list[VisionField] = []
+    for table in tables:
+        columns = [str(c).strip() for c in (table.get("columns") or [])]
+        if not columns:
+            continue
+        for row in table.get("rows") or []:
+            if not isinstance(row, list):
+                continue
+            for column, cell in zip(columns, row, strict=False):
+                text = "" if cell is None else str(cell).strip()
+                if not column or not text:
+                    continue
+                made.append(VisionField(label=column, value=text, handwritten=False))
+    return made
 
 
 def locate_values(
