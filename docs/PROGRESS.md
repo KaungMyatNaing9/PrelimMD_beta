@@ -1695,11 +1695,17 @@ the model, the prompt and the tile/table settings. A baseline and a variant then
 byte-identical model output, so the difference between them is the pipeline change and
 nothing else.
 
-| | |
+| TEST5, one measurement | |
 |---|---|
-| cold run, TEST5 | 30 min |
-| warm run | **6 min, and reproducible** (61.2% twice) |
-| cache | 8 hits, 3 misses |
+| before the cache | **30 min** |
+| successes cached | 6 min 20s |
+| **failures cached too** | **18 seconds** |
+
+The last step matters more than it sounds. A page that defeats the model raised before the
+write, so every run re-paid for it -- and each failure also buys a tiling retry, four more
+calls. Three such pages were the entire remaining cost of a "warm" run. Recording the
+failure as an outcome, and replaying it as one, took the run from six minutes to eighteen
+seconds with the score unchanged at 61.2% and seventeen straight cache hits.
 
 It is off by default: a cached reading is a stale reading and production must always ask the
 model. It also cannot answer questions *about* the model -- for variance or quality, run it
