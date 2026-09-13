@@ -12,7 +12,7 @@ import fitz
 from app.config import settings
 from app.schemas.form_understanding import DetectedFormField, FormAnalysis, RequiredStatus
 from app.schemas.models import BoundingBox, FieldType
-from app.services.canonical_registry import PHRASING, match, norm
+from app.services.canonical_registry import PHRASING, known_captions, match, norm
 from app.services.field_layout import (
     MARKED_INK_RATIO,
     Box,
@@ -879,6 +879,23 @@ def _centre_inside_box(inner: Box, outer: Box) -> bool:
     return outer.x0 <= cx <= outer.x1 and outer.y0 <= cy <= outer.y1
 
 
+# A value that is *exactly* a caption the vocabulary knows is the next field's label read
+# as this field's answer -- "City ____" answered "State", "Race /" answered "Ethnicity",
+# "Date of Birth ____" answered "Age". Rules are stripped first because the caption usually
+# arrives with its own empty rule attached.
+#
+# Exact, never fuzzy. Matching by token overlap also condemns "Bellefield Pharmacy", a real
+# answer that merely contains a field name; measured over 256 real answers the exact test
+# costs none of them and removes 21 of 137 false values.
+_CAPTION_RULE = re.compile(r"[_.\u2024\u2025\u2026]{2,}")
+
+
+def _is_a_caption(value: str) -> bool:
+    """Whether a value is itself one of the captions this vocabulary recognises."""
+    stripped = _CAPTION_RULE.sub(" ", value).strip(" .,-:/")
+    return bool(stripped) and norm(stripped) in known_captions()
+
+
 def _blank_furniture(fields: list[DetectedFormField]) -> None:
     """Clear values that are the form's own printing, once a reading has already won.
 
@@ -896,7 +913,7 @@ def _blank_furniture(fields: list[DetectedFormField]) -> None:
         value = field.normalized_value
         if not isinstance(value, str) or not value.strip():
             continue
-        if _is_question_tail(value) or _is_option_glyphs(value):
+        if _is_question_tail(value) or _is_option_glyphs(value) or _is_a_caption(value):
             field.raw_value = None
             field.normalized_value = None
             field.is_blank = True

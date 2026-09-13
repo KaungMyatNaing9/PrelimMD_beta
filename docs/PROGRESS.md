@@ -1576,3 +1576,38 @@ family-history grids are the cases that might.
 **Vision improves precision as well as recall** (45.6% -> 47.9%), measured here on the local
 7B model, which independently confirms the earlier Groq result on a different model. It does
 not merely find more values, it invents fewer.
+
+
+## Censusing the hybrid: vision reintroduces a failure geometry already solved (2026-09-13)
+
+Every false-value census before this was geometry-only, and precision is the worst number
+in the project. With vision on, 137 of 265 proposed values are not answers -- **124 of them
+at confidence 0.75 or above**, so they reach a reviewer looking like real readings.
+
+Reading them, the dominant pattern is one the geometric path already defends against:
+
+    City ______        = 'ST'              Referred by        = 'Address'
+    Race ______        = 'Ethnicity ____'  Signature ______   = 'Date'
+    Date of Birth ____ = 'Age ________'    Insurance Company  = 'Phone ______'
+
+The value is the **next caption on the row**. `_has_answer_space` stops the geometric reader
+doing this; the vision path had no equivalent, because nobody had looked at what it emits.
+
+The rule: a value that, once its fill-in rules are stripped, **is exactly a caption the
+vocabulary knows** is not an answer. Exact membership, never fuzzy -- token overlap also
+condemns "Bellefield Pharmacy", a real answer on five benchmark forms, and measured across
+256 real answers the exact test costs none.
+
+| | before | after |
+|---|---|---|
+| precision, vision on | 47.9% | **52.7%** |
+| precision, geometry only | 45.6% | **49.8%** |
+| TEST4, vision on | 54.0% | **60.3%** |
+| TEST2 / dev | unchanged | unchanged |
+
+**Recall rose as well as precision**, which is a real mechanism rather than luck: the scorer
+keeps the first non-empty value under each label, so a furniture value was *occupying the
+slot* a real answer needed. "City ______ = State" was blocking the actual state.
+
+The thread worth pulling next: this is a geometric protection with no vision counterpart,
+and there may be more of them.

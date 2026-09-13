@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 
 from app.schemas.form_understanding import CanonicalFieldDefinition
 from app.schemas.models import FieldType
@@ -303,3 +304,18 @@ def match(label: str):
         if best[0] >= 0.5
         else (None, best[0], "no confident registry match")
     )
+
+
+@lru_cache(maxsize=1)
+def known_captions() -> frozenset[str]:
+    """Every caption this vocabulary recognises, normalised, for exact comparison.
+
+    A *value* that is exactly one of these is the next field's label read as this field's
+    answer -- "City ____" answered "State" -- and callers use it to blank such a reading.
+    Exact membership rather than `match`, which scores by token overlap and would also
+    condemn "Bellefield Pharmacy", a real answer that merely contains a field name.
+    """
+    captions = {norm(key) for key in REGISTRY}
+    for field in REGISTRY.values():
+        captions.update(norm(alias) for alias in field.aliases)
+    return frozenset(c for c in captions if c)
