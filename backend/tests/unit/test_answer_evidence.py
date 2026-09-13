@@ -171,3 +171,32 @@ class TestSuppressionRunsAfterTheCompetition:
         assert len(fields) == 1, "the field must survive -- only its value is cleared"
         assert fields[0].normalized_value is None
         assert fields[0].is_blank and fields[0].needs_review
+
+
+class TestTheValueIsTheNextCaption:
+    """A value that is exactly a caption is the next field's label, not an answer.
+
+    Found by censusing what the *hybrid* emits -- every earlier census was geometry-only.
+    The vision model reads "City ______" and reports "State", the caption beside it, as the
+    answer: the same failure `_has_answer_space` prevents on the geometric path, which the
+    vision path had no equivalent for because nobody had looked.
+    """
+
+    def test_a_bare_caption_is_not_an_answer(self):
+        from app.services.form_analyzer import _is_a_caption
+
+        for value in ["State", "Ethnicity", "Address", "Birth Date", "Age ________"]:
+            assert _is_a_caption(value), value
+
+    def test_an_answer_that_merely_contains_a_field_name_survives(self):
+        from app.services.form_analyzer import _is_a_caption
+
+        # Exact membership, never fuzzy: matching by token overlap also condemns this,
+        # a real answer on five of the benchmark forms.
+        assert not _is_a_caption("Bellefield Pharmacy")
+
+    def test_ordinary_answers_survive(self):
+        from app.services.form_analyzer import _is_a_caption
+
+        for value in ["Amara", "PA", "04/17/1986", "Riverside Logistics", "Pittsburgh"]:
+            assert not _is_a_caption(value), value
