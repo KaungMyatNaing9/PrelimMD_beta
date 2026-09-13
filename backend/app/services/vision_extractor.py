@@ -233,8 +233,27 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
 
     cached = _cache_read(image, provider)
     if cached is not None:
+        if cached.get("__failed__"):
+            # A page that defeated the model is replayed as having defeated it. Caching only
+            # successes left every failing page calling the model on each run -- and each
+            # failure also pays for a tiling retry -- which is what kept a "warm" TEST5 run
+            # at six minutes when the successes cost nothing.
+            raise HTTPException(502, str(cached.get("detail") or "Vision read failed"))
         return _fields_from(cached)
 
+    try:
+        raw = _read_whole(image, call, expect_answers)
+    except HTTPException as exc:
+        _cache_write(image, provider, {"__failed__": True, "detail": exc.detail})
+        raise
+
+    _cache_write(image, provider, raw)
+    fields = _fields_from(raw)
+    return _finish(raw, fields, image)
+
+
+def _read_whole(image: Path, call, expect_answers: bool) -> dict:
+    """The model's reply for a whole page, falling back to its parts when that fails."""
     if TILE_GRID > 1:
         # EXPERIMENT: read every page in enlarged pieces, not only the ones that failed.
         # A FUNSD scan is 1000px wide and can hold seventy-seven question/answer pairs, so
@@ -271,11 +290,12 @@ def extract(image: Path, expect_answers: bool = False) -> list[VisionField]:
         # four, the same model read 9 of them.
             if expect_answers and not raw.get("fields"):
                 raw = _read_in_pieces(image, call) or raw
+    return raw
 
-    _cache_write(image, provider, raw)
-    fields = _fields_from(raw)
+
+def _finish(raw: dict, fields: list[VisionField], image: Path) -> list[VisionField]:
+    """Hand back the reading, refusing to let a truncated one pass as complete."""
     if raw.get("truncated"):
-        # A partial read must not look like a complete one.
         raise VisionTruncated(
             f"Vision model output was cut off after {len(fields)} fields; the page has "
             "more. Raise num_predict or split the page.",
