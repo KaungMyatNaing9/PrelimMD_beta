@@ -1611,3 +1611,28 @@ slot* a real answer needed. "City ______ = State" was blocking the actual state.
 
 The thread worth pulling next: this is a geometric protection with no vision counterpart,
 and there may be more of them.
+
+
+## TEST5: a fifth set, and a third confirmation (2026-09-13)
+
+Every intake claim rested on 132 fields across TEST2 and TEST4, and that thinness has misled
+twice -- self-templating measured +6.4 on 63 fields, and the same idea was +3.0 on ten FUNSD
+forms but -1.0 on fifty. `TEST5/` adds four real clinic forms and **67 fields**, a 50%
+increase in intake evidence, downloaded from public sites and filled beside their own printed
+labels. Each was checked against all 31 existing blanks by word-set Jaccard; nearest
+neighbours were 0.25-0.38, well short of the 0.6 that would mean the same layout under
+another practice's name.
+
+| set | geometry | hybrid | gain |
+|---|---|---|---|
+| TEST2 | 72.5% | 75.4% | +2.9 |
+| TEST4 | 44.4% | 60.3% | +15.9 |
+| **TEST5** (new) | **50.7%** | **59.7%** | **+9.0** |
+
+Three unseen sets now agree that vision is worth a lot on intake. They also disagree about
+the absolute number by thirty points -- 44%, 51%, 73% geometry-only -- which says
+**form-to-form variation dwarfs most of the changes measured all week**. That is the
+strongest argument yet for quoting a range across sets rather than a single headline, and
+for why single-set results have been so unreliable.
+
+`TEST5` is in `make bench` and in the precision measure, so it cannot be skipped.
