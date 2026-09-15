@@ -1757,3 +1757,742 @@ Those timeouts are not a cache artefact. Three pages of TEST5 defeat the local m
 every run, cached or not, and the reported hybrid figure stands with them blank. A faster
 local model, or a longer timeout, would be measuring something different from what is
 reported today.
+
+---
+
+## 2026-09-13 — The benchmark corpus was passable without reading
+
+### What was wrong
+
+Every filled form in `data/real-forms/` carried **the same invented patient**. One name, one
+address, one phone number, one insurer, repeated across 150 artefacts. That is a benchmark
+a reader could score on by memorising a string, and any threshold that happened to suit one
+name's length would have read as accuracy rather than as a coincidence. Nothing in the
+pipeline trains, so nothing had literally memorised it — but the measurement could not have
+told us either way, which is the same problem.
+
+Raised by the user directly: *"wait I said different for each. why only amara c okafor.
+wouldnt that cause problems?"*
+
+### What changed
+
+`scripts/fill_forms.py` now draws **a different patient per form** — name, middle name,
+date of birth, SSN, street, city, state, ZIP, three phone numbers, email, employer,
+occupation, emergency contact and relation, insurer, member and group id, pharmacy,
+physician — from pools, seeded from the form's own filename with SHA-256 so the draw is
+**reproducible**: re-running the filler rebuilds the identical corpus and the ground truth
+stays valid.
+
+Details that matter:
+
+* **Fiction by construction, not by hope.** Phones stay inside the 555-01xx range reserved
+  for fiction, SSNs use a 9xx area that has never been issued, mail goes to `example.com`.
+* **Phone punctuation varies per patient** — `412-555-0184`, `(412) 555-0184`,
+  `412.555.0184`. Scoring strips punctuation, so this costs the benchmark nothing and
+  catches a reader keyed to one house style.
+* **Dates stay numeric.** `form_analyzer.normalize` rewrites `"August 25 2026"` to an ISO
+  date and leaves `"08/25/2026"` alone, so a spelled-out month would have scored the
+  normaliser rather than the reader.
+* **Internally consistent.** Area code matches the city. A "Brother" is not named Saoirse.
+  A patient born in 2006 is a Student, not a Reference Librarian. None of this affects
+  scoring; it affects whether a human can review the corpus by eye for the placement errors
+  that *do* affect scoring.
+
+`_patients` in each `ground_truth_new.json` records which patient went on which form.
+
+### Three filler fixes found while doing it
+
+These grew the corpus; none of them touched the extractor.
+
+1. **Write inside the span, not after it.** Real forms put a whole row in one text span —
+   `"Address ______ City ______ State"` — so writing after the *span* put the value past the
+   end of the row, where there is no room and no field. One form refused twelve of twelve
+   labels for this; eight forms filled nothing at all. The write point now comes from
+   `page.search_for()`, which reports where a substring truly sits, with a proportional
+   measurement as fallback. A first attempt measured proportionally only and put the value
+   hard against the label — `"Patient Occupation/EmployerRiverside Logistics"` — which the
+   eye separates by colour and OCR returns as one token.
+2. **Six pages, not two.** These are packets; a welcome letter, a HIPAA notice and a
+   financial policy commonly sit ahead of the registration page.
+3. **Fillable PDFs.** 23 of 86 forms carry AcroForm widgets, so the answer space is a widget
+   and not a printed rule — one form had 302 widgets and filled a single field. Values are
+   now typed into widgets whose **name the designer wrote**, exact matches only (`"First
+   name"` yes, `"demographic t 7"` no — guessing from a widget's position would be inferring
+   the layout, which is the extractor's job and would make the benchmark circular). Then
+   `doc.bake()` flattens them into page content, because a live widget is invisible to
+   `page.get_text()` and the PDF reader would have been scored against answers it cannot see.
+
+Also: the JPG artefact now renders **the page that carries answers**, not always page 1.
+Half these packets open with a welcome letter, so the image half of the benchmark was
+scoring against a picture of prose.
+
+### Result
+
+| | before | after |
+|---|---|---|
+| forms producing artefacts | 77 | **85** |
+| annotated fields | 1,302 | **2,127** |
+| forms with fewer than 5 fields | 28 | **7** |
+| distinct patients | **1** | **85** |
+
+Placement was verified by eye on rendered pages, not only by count.
+
+### Consequence for every figure taken before today
+
+**The 67.1% geometry-only figure on LARGE was measured on the single-patient corpus and is
+not comparable to anything measured after it.** TEST2/TEST4/TEST5 were deliberately left on
+their old fills so their published numbers stay comparable with the history; LARGE is the
+benchmark from here, and it is re-baselined below.
+
+### Plan to 90%
+
+Written up separately in `docs/PATH_TO_90.md`, with the short version being that "90%
+accuracy" names two different numbers 20–30 points apart, and only the enrolled one can get
+there with free tools.
+
+---
+
+## 2026-09-13 (evening) — The control, the enrolment run, and what left the repo
+
+### G1b: a repeated patient did not inflate the score — it lowered it
+
+`data/real-forms/SAME/` (the same 86 blanks, the same filler, one patient on every form)
+was scored against the same code and the same server process as `LARGE/`, on the 2,106
+(document, field) pairs both sets hold:
+
+| | fields | correct | recall |
+|---|---|---|---|
+| LARGE, a patient per form | 2,106 | 1,311 | **62.3%** |
+| SAME, one patient throughout | 2,106 | 1,197 | **56.8%** |
+
+Delta **−5.4** points. So the 67.1 → 62.3 drop this morning was the 825 extra fields from
+harder forms, entirely; value variety cost nothing. LARGE reproduced its baseline to the
+field (1,326 / 2,127), as a deterministic geometry-only arm should. SAME has been deleted,
+as its README said to.
+
+The two sets are not field-for-field twins — a longer name does not fit where a shorter
+one did, so 34 fields exist only in SAME and 21 only in LARGE — which is why the
+comparison is on the intersection and not on the two headlines (56.3% / 62.3%).
+
+**The useful finding is not the delta but the variance.** 98 of 170 pages changed score
+when *only the written values* changed, and two JPG pages collapsed (8/8 → 0/8 and
+8/13 → 2/8). Re-analysed against a clean registry (`flip_check.py`, four saved runs):
+same page, same 37 boxes detected, and the varied fill reads as `inline` with the names
+right while the single-patient fill reads as `boxed` and binds printed captions as
+answers (`DATE OF BIRTH = 'FIRST NAME MIDDLE'`, `EMPLOYER'S ADDRESS = 'STATE ZIP CODE'`).
+`_best_layout` scores the two readers by how many fields they answered, and a reader that
+mistakes captions for answers answers *more* — 21 "filled" against 11. The strategy choice
+is therefore sensitive to the values written on the page, which is exactly the
+overfitting the varied corpus exists to expose. It is a scoring problem, not a detection
+one, and it is the next thing to fix in the reader.
+
+### G3: enrolment is negative at scale
+
+`scripts/evaluate_enrolled.py --set LARGE`: 85 blanks, **50 enrolled, 36 not derivable**;
+all 170 artefacts re-scored with the 50 templates registered; every template released
+(registry identical before and after).
+
+| forms | artefacts | fields | zero-shot | enrolled | delta |
+|---|---|---|---|---|---|
+| own blank enrolled | 100 | 1,269 | 64.9% | 61.1% | **−3.9** |
+| blank not derivable | 70 | 858 | 58.5% | 58.5% | **±0.0** |
+| all | 170 | 2,127 | 62.3% | 60.0% | −2.3 |
+
+Two facts in that split. Template matching never mis-fired: the 70 artefacts without a
+template of their own moved by exactly zero fields, so fifty registered templates did not
+capture forms that were not theirs. And where enrolment applied, it made reading *worse*:
+14 → 1 on one PDF, with the losses in the plain demographics (Address 8, Email 6, Date of
+Birth 6, State 6, Last Name 5). 133 of 170 artefacts unchanged, 14 improved (largest +4),
+23 worsened (largest −13).
+
+**B1's kill condition in `docs/PATH_TO_90.md` is met.** TEST4's +12.7 was the outlier and
+TEST2's −2.9 was the signal. The ≥90%-enrolled track has no evidence behind it *as
+implemented* — derive a template from the blank's page 0, read filled copies through it.
+The concept is not disproved; this mechanism is. Before any Track B work the question is
+why a matched template reads worse than no template, and
+`birminghamheart_com__Patient-form_FILLED.pdf` (14 → 1) is the case to open first.
+
+Two defects surfaced on the way, both fixed:
+
+* `evaluate_enrolled.py` printed "0 slots" for every enrolment — it read `pages[0].fields`
+  from a response that carries `field_count`. The templates had 5–36 slots each.
+* `drkahlam_com__reginfo.pdf` could not be enrolled: a one-letter caption slugged to `'f'`,
+  which fails `TemplateField`'s two-character id pattern and aborted the whole derivation.
+  `label_key` now pads such ids (`field_f`), with tests.
+
+Of the 36 blanks that could not be enrolled, most report "not derivable" or "no answer
+regions" on page 0; several of these packets open with a letter, and `derive_template`
+learns page 0 only. Multi-page enrolment is not modelled.
+
+### The benchmark is now 112 forms
+
+The 26 unlocked blanks outside LARGE (NEW 7, TEST2 7 — TEST3 holds the same seven —
+TEST4 5, TEST5 4, the original 3) were folded in and filled with the same seeded filler.
+The old 86 are untouched: all 170 existing truth entries identical, all 85 existing JPG
+renders byte-identical (re-saved PDFs differ in bytes only). LOCKED stays locked.
+
+| | before | after |
+|---|---|---|
+| blank forms | 86 | **112** |
+| artefacts | 170 | **222** |
+| annotated fields | 2,127 | **2,775** |
+| distinct patients | 85 | **111** |
+
+Zero-shot geometry on the 112 forms: **61.2% (1,699 / 2,775)**.
+
+### What left the repo
+
+At the user's direction ("delete all that won't mess up"): the stale `backend/artifacts`
+root (8.4G, written by servers started inside `backend/`), 1,932 run folders older than a
+day (2.7G), `SAME/`, the synthetic corpus with its generator, manifest checker and
+`make corpus`, `evaluate_corpus.py` and `make evaluate` (they scored the dead `/captures`
+pipeline), `fill_fixture.py`, `try_vision.py`, `show_progress.sh`, `docs/DEMO_SCRIPT.md`.
+All of it sits in `~/.Trash/prelimmd-cleanup-2026-09-13` until the Trash is emptied, and
+the tracked files are one `git checkout` away besides. `make smoke` now uploads a real form
+through `/form-analyses` and starts its server from the repo root — starting it inside
+`backend/` is how the 8.4G folder came to exist. The registry starts empty; the
+regeneration unit tests skip when no template is on disk (7 skipped), a coverage gap to
+close with a real-form-derived fixture. Kept on purpose: `NEW/` (seven unique real blanks),
+TEST2–5, HANDWRITTEN, LOCKED, FUNSD, `evaluate_fill.py`, `demo_roundtrip.sh`,
+`funsd_signal_probes.py`, `sweep_constants.py`, `evaluate_scans.py`.
+
+Not done tonight, deliberately: removing the dead `/captures` pipeline (`extraction.py`,
+89 lines of routes, four functions in `api.ts`, one test). Shipped code, its own commit.
+
+### Addendum, later the same evening
+
+At "remove anything unnecessary that you are 100% sure won't be reused": also to the Trash
+went every run folder under `artifacts/` (1,295, 1.9G, all of tonight's benchmark residue),
+`artifacts/evaluation/` (outputs of the deleted corpus scorer), `data/real-forms/NEW/` (its
+seven blanks are in LARGE; only the contaminated single-patient fill remained),
+`data/real-forms/TEST3/` (a second fill of TEST2's seven blanks, no README, unreferenced),
+three unreferenced blank renders in the real-forms root, `scripts/funsd_signal_probes.py`
+(a negative result plan.md already records) and `HANDOFF.md` (written on the belief that
+sessions could not transfer between accounts). `fill_forms.py` now defaults to LARGE.
+Kept because reuse is not ruled out: TEST2/TEST4/TEST5 (`make bench` runs them and every
+historical vision number was taken on them), the original three-form set (all regeneration
+numbers), `evaluate_fill.py`, `demo_roundtrip.sh`, `plan.md`, the build caches.
+
+One consequence for LARGE's standing as an unseen set: seven of its 112 blanks are NEW's,
+which were fixed against five times, and seven are TEST2's, which were used to diagnose
+the PDF baseline tolerance. `data/real-forms/CONTAMINATION.md` now records that.
+
+### Addendum: the legacy `/captures` pipeline is gone
+
+At the user's go: `backend/app/services/extraction.py` (200 lines), the seven `/captures`
+and `/runs/*` routes (101 lines of `main.py`), the four unused functions in
+`frontend/src/lib/api.ts` and the `schemas.ts` only they imported, and the three tests of
+the legacy normaliser. Nothing in the UI called any of it — every page runs on
+`/form-analyses` — and its last user was the smoke test rewritten earlier tonight. With it
+goes the two-`normalize` phone-format trap. `docs/API.md` is now generated from the live
+route table. Tests 118 passed / 7 skipped, lint and typecheck clean, smoke green.
+Also removed: the six schema definitions only that pipeline used (`ExtractionSource`, `ExtractedField`, `ExtractedPage`, `ExtractionSummary`, `ExtractionRun`, `EvaluationMetrics`); the one test that used them now checks the live `DetectedFormField` contract.
+
+## 2026-09-14 — Enrolment made additive, the fifty-template cap, every page learned
+
+The research pass (`docs/RESEARCH_TO_90.md`, eight capped agents in a separate session)
+re-ranked the levers against the loss breakdown. Its reframing holds: 1,699 correct + 791
+misses = 2,490 = 89.7%, so fixing *every* miss perfectly still lands under 90%, and 90% is
+an enrolled-track number only. Its three L1 defects were checked by hand against the repo
+before anything was written: `align_to_template` is referenced only by a docstring, the
+template read was `pages[0]` hardcoded, and `_merge_template` let an *answered* slot
+outrank a correct free-form value. All three true.
+
+### L1a: the template may only add
+
+`_merge_template` inverted. The page's own reading stands; a slot is appended only where it
+brings something the page did not -- a value where the page read none, a field where the
+page found none. A reading that only adds cannot score below the reading it adds to, so the
+zero-shot score is a floor by construction. Measured (`evaluate_enrolled.py --set LARGE`,
+50 templates -- see the cap below -- registry identical before and after):
+
+| forms | artefacts | fields | zero-shot | enrolled | delta |
+|---|---|---|---|---|---|
+| own blank enrolled | 100 | 1,297 | 66.9% | **68.8%** | **+1.9** |
+| no template of their own | 122 | 1,478 | 56.2% | 56.2% | ±0.0 |
+| all | 222 | 2,775 | 61.2% | **62.1%** | +0.9 |
+
+Yesterday the same mechanism was −3.9 where it applied. 16 artefacts improved (largest +5,
+`hoag_FILLED.pdf` 10 → 15), 4 lost a field -- which the additive rule should make
+impossible. The mechanism, from the field diffs: a slot captioned "Date of Birth" whose box
+caught `STREET,`, appended beside the page's correct birth date read under "DOB"; "Zip
+Code" holding `State ______ LA Zip ____` beside the page's correct zip under "Zip"; "Phone
+Number" holding `INSURED NAME`. Same question, a second and worse answer, listed under the
+ground truth's own wording. Two refinements landed, not yet re-measured: a slot answering a
+question the page already answered -- by canonical key or by caption wording -- is dropped,
+and slot values go through `_blank_furniture` like every other field (they never had).
+Precision on the enrolled subset went 58.0 → 54.9% (1,572 → 1,806 proposed values), which
+is the same furniture; it is the number to watch on the re-run.
+
+### The fifty-template cap
+
+Of 112 blanks, 50 enrolled, 15 were genuinely not derivable (11 "no answer regions", 4 "no
+usable caption"), and **47 crashed with `RuntimeError: No derived template ids remain`**.
+Derived ids ran `T50`–`T99`: fifty, total, for a clinic or a benchmark. Yesterday's "36 of
+85 not derivable" was mostly this cap, reported as "not derivable" because a plain-text 500
+is not JSON and the script printed its fallback. `template_id` now allows `T\d{2,4}`,
+`DERIVED_ID_END` is 9999, and `evaluate_enrolled.py` says "server error" when the reply
+is not JSON.
+
+With fifty templates registered every analysis took ~15 s instead of ~2.5: `registry.match`
+re-read and re-described every master image on every call. Masters' ORB features are now
+cached per template (cleared on `load()`); a page is described once and matched fifty times
+in well under a second.
+
+### Every page is learned
+
+`derive_template` learns every page of the packet, not page 0; `_read_with_template` reads
+page *k* of a filled copy through template page *k* (packets keep their page order between
+blank and fill); a page with no regions is kept as an empty page so indexes line up;
+`blank_preview_p{k}.png` per page, page 0 keeping its old name so earlier templates still
+resolve. `derive-template` reports counts across pages. Not yet measured.
+
+### AcroForm widgets are answer spaces
+
+`widget_boxes(pdf, index)` returns the text widgets' rectangles in render pixels; when a
+page has them `geometric_fields` puts them first and keeps only the detected boxes and
+rules that are not the same space seen twice. The designer's own field names are not used
+yet (they are often `Text1`); captions still come from the page. Not yet measured.
+
+### Precision beside recall, and LARGE in `make bench`
+
+`evaluate_real_forms.py` prints `REAL-FORM PRECISION` from the same responses, by
+`intake_field_coverage.py`'s rule (a value is vouched for when it and a written answer
+contain one another). LARGE zero-shot: **61.2% recall (1,699 / 2,775), 58.1% precision
+(1,857 / 3,196 proposed)**. `benchmark_all.py` now runs LARGE zero-shot every time and
+LARGE enrolled outside `--quick`; the benchmark had sat outside the runner for a day.
+`--dump DIR` keeps every analysis response for page-by-page comparison.
+
+### Housekeeping
+
+`_reads` (no callers since the merge change) removed. `"prelimmd medical center"` removed
+from `HEADINGS`: a specific clinic's letterhead from the deleted synthetic corpus, inside a
+rule meant to be generic. One caution recorded for L4 (PDF font cues): the benchmark's
+values were typed by `fill_forms.py` in a font it chose, so caption-versus-value font
+differences measured here would measure the filler, not clinics' forms. Ollama carries no
+local text model; L3 would need `qwen2.5:7b-instruct` pulled first.
+
+### L2: the two readers reconciled one caption at a time
+
+`_best_layout` kept whichever reader answered more fields, whole page at a time, and a
+reader that mistakes captions for answers answers *more* (21 "filled" to 11 on a page the
+eleven were right about). Behind `LAYOUT_CHOICE=assign`, both readers' proposals are now
+pooled and taken best-first under one rule -- a run of words serves once, as one caption's
+value or as one caption, never both -- with hand-set weights: the value's plausibility for
+its type (soft), a known caption, the reader's confidence, a bonus where both readers
+propose the same value for the same caption, and a small prior for the reader that read
+the page better as a whole. Furniture weighs nothing. The reader that lost the page may
+contribute only captions the vocabulary knows.
+
+Three versions, all measured on LARGE against the same build (`LAYOUT_CHOICE=best`
+reproduced 61.2 / 58.1 exactly first):
+
+| version | recall | precision | what was wrong |
+|---|---|---|---|
+| page-level count (today's baseline) | 61.2% | 58.1% | — |
+| v1: Hungarian matching, captions and values in separate pools | 63.2% (+1.9) | 55.6% (−2.5) | a sum objective takes two mediocre edges over one good one; every junk edge that conflicts with nothing is added; "Portland" served as one candidate's caption and another's value |
+| v2: greedy with run exclusivity, furniture = 0, loser needs a known caption | 54.1% (−7.2) | 66.3% | PDF text layers hand over "__________ Eguchi"; `plausible` calls the underscore furniture, and the whole PDF half fell 14 points |
+| **v3: v2, value judged with its rule stripped** | **63.2% (+1.9)** | **67.8% (+9.7)** | PDF 62.8 → 65.4 / 53.7 → 65.8; JPG 59.3 → 60.4 / 64.8 → 70.6; 45 artefacts up, 11 down by at most two fields |
+
+v3 meets the research's own kill test (beat the count on recall *and* precision on the same
+set) and lands inside its predicted precision band (65–72%). Not adopted as the default
+until TEST2/TEST4/TEST5 and FUNSD agree -- both arms are being run on them now. scipy was
+added for v1 and removed again with it.
+
+Two findings on the way that are worth more than the numbers. The page-level score
+(`reads`) uses `plausible`, which calls a rule-carrying PDF value furniture, so it has been
+under-counting the inline reader on every ruled PDF -- a bias in which reader wins those
+pages that nobody had noticed. And `plausible` tested for furniture before it tested for an
+e-mail, so `noor_k@example.com` scored as implausible; fixed, with a test (no benchmark
+address carries an underscore, so no number moved).
+
+### Enrolment at full scale: every blank, every page, widgets, the additive rule
+
+`evaluate_enrolled.py --set LARGE` with the id cap gone, every page learned and widgets in
+(zero-shot floor = the assignment reader's third version, 63.2 / 67.8 on the same build):
+**108 of 112 blanks enrolled, 4 genuinely not derivable, no errors**; registry identical
+before and after.
+
+| forms | artefacts | fields | zero-shot | enrolled | delta |
+|---|---|---|---|---|---|
+| own blank enrolled | 216 | 2,727 | 63.0% | **67.4%** | **+4.4** |
+| no template of their own | 6 | 48 | 72.9% | 72.9% | ±0.0 |
+| all | 222 | 2,775 | 63.2% | **67.5%** | +4.3 |
+
+61 artefacts improved (largest +6), **one lost one field**, and the six without a template
+did not move. The additive rule is doing what it was built to do: yesterday's −3.9 is +4.4
+on more than twice the artefacts. Precision on the enrolled subset fell 67.8 → 63.0
+(2,623 → 3,151 proposed): of the 527 values slots added, **206 are answers written on the
+page and 321 are the form's own printing** caught inside slot boxes -- option rows ("angry
+expressing guilt suspicious"), the neighbouring caption ("apt/trailer # city ____",
+"contact", "(name)"), rule glyphs. The enrolled track has an oracle for exactly that which
+zero-shot never will: the blank. Each slot now stores the text the blank prints inside it
+(`TemplateField.printed_text`, learned from the blank's own OCR), and a read through the
+slot drops those tokens with multiplicity before anything else looks at the value.
+Measured in the final `make bench` below.
+
+### The fourth version of the reader, and why it was reverted in part
+
+Per-label diffs of the third version showed three losses with mechanisms: `Race` rows lost
+to a losing-reader *blank* candidate captioned with an option's own text that hijacked the
+tick boxes; "Emergency Contact" = a real name zeroed because the caption sits in
+`HEADINGS`; "#_GRP24741" zeroed because one underscore survives the rule stripping and
+`plausible` calls it furniture. The fourth version made plausibility, heading and caption
+length soft costs for every caption and stopped the losing reader adding blanks: recall
+63.2 → 64.4 but precision 67.8 → **61.4** -- softening the tests for every caption
+re-admitted the unopposed junk they exist for. The fifth keeps the hard tests, exempts only
+captions the vocabulary maps from the heading and length tests, and strips a stray rule
+glyph before judging shape. It also carries the date-ordering term (a birth caption prefers
+the page's earliest date, a plain date caption its latest; `DATE_ORDER`), which the
+research listed as L6.
+
+### The fifth version, on every set
+
+Same build, `LAYOUT_CHOICE=best` against the default (`assign`, fifth version):
+
+| set | recall before → after | precision before → after |
+|---|---|---|
+| **LARGE (the benchmark)** | **61.2 → 64.5** | **58.1 → 67.9** |
+| TEST2 | 72.5 → 72.5 | 62.1 → 71.1 |
+| TEST4 | 44.4 → 52.4 | 41.7 → 53.9 |
+| TEST5 | 50.7 → 55.2 | 58.5 → 58.0 |
+| intake precision (TEST2/4/5 by `intake_field_coverage.py`) | — | 54.2 → 61.4 |
+| FUNSD links (third version; fifth in the final table below) | 18.3 → 17.1 | — |
+
+Against the third version, the fifth gained 36 fields on 33 artefacts and lost none. LARGE
+decides (user, 2026-09-14: "the 100+ real forms ... should be the main"); the others are
+run so that nothing is adopted on one set, and the two TEST2 `Race` rows the third version
+had lost are back.
+
+### A regression the full run caught: captions beneath a rule
+
+The first full `make bench` on the assignment reader came back with placement 76.5%
+(13 / 17) against the recorded 78.9% (15 / 19) and the dev forms at 27 / 34 where the
+record says 34 / 34. Same four misplaced values at the same distances, so not a placement
+error: two St. Clair values were no longer *read*. Under `LAYOUT_CHOICE=best` on the same
+build, 15 / 19 and 34 / 34 came straight back, so it was the reader. The dumps showed the
+`CITY` / `STATE` / `ZIP CODE` column fields gone from the page entirely: their captions
+are printed beneath the address rule at the same height as the phone row, whose answer
+region spans the page, and the rule that a run of words cannot be one proposal's caption
+and another's value tested "same place" either way -- the small captions' centres lay
+inside the wide phone region, and all three fields were excluded, not even kept blank.
+Across kinds the test now requires the *same run* (each region holds the other's centre),
+which is what the Portland case it was written for looks like. Dev forms 33 / 34 with
+precision 73.9 → 82.5, placement back to 15 / 19, and LARGE +3 fields with none lost
+(64.6 / 67.8). The 34th dev field was a PDF birth date typed into boxed cells, handed
+over as `04 / 17 / 1986`; `plausible`'s date pattern refused the spaces and the quality
+function zeroed it, where the old reader had only used that test to score the page.
+`plausible` now collapses spaces around date separators (with a test).
+
+Two lessons the day repeated three times: every hard zero copied from `_looks_answered`
+into a per-field decision cost real values it had never cost as a page score, and a
+"same place" test that is right for two captions or two values is wrong across kinds.
+Both are recorded in the code beside the rules.
+
+### Final `make bench`, 2026-09-14 (assignment reader, additive multi-page enrolment)
+
+| benchmark | result | before today |
+|---|---|---|
+| dev forms (tuned against) | 100.0% recall, 80.5% precision | 100.0% / 73.9% |
+| TEST2 zero-shot | 72.5% / 71.1% | 72.5% / 62.1% |
+| TEST4 zero-shot | 52.4% / 53.9% | 44.4% / 41.7% |
+| TEST5 zero-shot | 55.2% / 58.0% | 50.7% / 58.5% |
+| **LARGE zero-shot** | **64.6% / 67.8%** | 61.2% / 58.1% |
+| intake precision (TEST2/4/5) | 61.4% | 54.2% |
+| **LARGE enrolled** | **68.3% / 67.8%** (own-template subset +3.7, others ±0, 47 up / 0 down) | 60.0% (−3.9 where applied) |
+| FUNSD linking | 17.1% | 18.3% |
+| placement ≤2mm | 78.9% | 78.9% |
+| round-trip | **65.2%** | 69.6% |
+
+Registry identical before and after. Two dips, both recorded as open: FUNSD −10 links of
+812 (the yardstick, not the benchmark), and round-trip −1 value of 23 -- on the regenerated
+St. Clair page the reader now returns "Riverside" for Employer where it returned "Riverside
+Logistics"; the first analysis reads the full value, so it is the re-read of the regenerated
+page that truncates, most likely an inline candidate winning the caption with a shorter run.
+Not investigated today.
+
+What did not happen today, and why: L3 (the grounded re-linker over orphan spans) needs a
+local text model that is not installed (`qwen2.5:7b-instruct`, ~4.7 GB; Ollama here has
+only the vision model, PaddleOCR-VL and cloud-hosted tags, which are not admissible), and it
+is the one lever whose payoff the research could not predict; L4's font cues would measure
+the filler's font choice on this benchmark (see above); registration (`align_to_template`)
+stays unwired for want of a skewed scan to test it against. The user's UI backend on port
+8000 was started before any of this and runs the old code until restarted. Nothing is
+committed.
+
+## 2026-09-14 (later) — What a reviewer's correction teaches a template
+
+The user's reaction to the day's numbers was the right one: the research was commissioned
+to find a route to 90%, and 64.6% zero-shot is not it. The research's answer was that
+90% is an enrolled number reached by *corrections teaching each template* -- "the second,
+third and fifth examples are free" -- and nothing had been built for that. Now there is:
+
+- `POST /api/v1/templates/{id}/corrections` takes `{page_index, label, bbox, value?}`
+  entries and makes (or replaces) that caption's slot, keyed by the vocabulary where it
+  knows the caption, with the blank's printing inside the region recorded for subtraction
+  (`template_builder.learn_corrections`). A review UI that lets a reviewer confirm or draw
+  a region calls this; the PATCH on a field does not call it yet, because a corrected
+  *value* on a field bound to the wrong place would teach the wrong place.
+- A second benchmark fill, `data/real-forms/LARGE_B/` (same 112 blanks, `fill_forms.py
+  --variant B`: 222 artefacts, 2,793 fields, 111 distinct patients, none shared with the
+  first set). Teaching happens on the first set's fill and scoring on the second, so
+  nothing memorised about one patient can count. Zero-shot on it: **64.3% recall, 69.6%
+  precision** -- the first set's 64.6 / 68.9 on different values, which is the check that
+  the day's reader was not fitted to the first set.
+- `scripts/evaluate_corrected.py --positions {none,detected,oracle}`: the blank alone,
+  what today's UI can confirm (regions of detected fields whose value the reviewer agrees
+  with), and where every true value actually sits on the teaching fill (the ceiling for
+  the mechanism, and the case for a draw-a-region affordance in review).
+
+Values shown in review are clean now, too: `normalize` strips runs of rule glyphs, so a
+PDF's "__________ Guerrero" is "Guerrero" (the scorer never saw the difference; a reviewer
+saw it on every ruled PDF), and a reading whose raw text has words *between* rule runs
+("__ Male __ Female", a tick row drawn as rules) is furniture. LARGE 64.6 / 68.9 after
+both, placement and round-trip unchanged.
+
+### One corrected fill per form, measured on a second fill
+
+`evaluate_corrected.py --positions oracle` (teach from the first set's fill at the true
+positions of its values, score the second set; 108 templates, 1,489 corrections taught,
+registry identical after):
+
+| arm, second set (2,793 fields) | recall | precision |
+|---|---|---|
+| zero-shot | 64.3% | 69.6% |
+| blank + one corrected fill, slots additive | **74.7%** | 70.8% |
+
++10.6 on the 216 artefacts with their own template, ±0 on the six without, **124 artefacts
+up and none down**. The research's arithmetic said 90% was an enrolled number reached by
+corrections; the first corrected fill is worth ten points on a form never seen with that
+patient.
+
+Of the 708 remaining failures, 326 are misses and 363 wrong values, and **350 of the 363
+wrong values are on captions the template had been taught**: the page's own misreading
+("Chattanooga State", "Name_Analise", "H2A Visa" for a state) stood in front of the
+reviewer's slot, because the additive rule lets the page lead. That rule was right for a
+slot guessed from a blank and wrong for one a reviewer placed. Taught slots are now marked
+(`TemplateField.taught`), read back with `source="reviewer"`, and displace the page's
+fields at their place and on their question; inferred slots still only add. Re-measured
+below.
+
+### The reviewer's slot leads, with two guards
+
+Unconditional override measured worse than additive (74.0 / 70.6): misses fell 326 → 208
+but wrong values rose 363 → 518. Of the 224 fields it broke, 159 were the slot reading
+*past* the true value into the next field ("2986 Lantern Hill Road Apt/Trailer") and 61
+were the oracle placing a value's *first* occurrence on the page, which for a surname the
+emergency contact shares was the contact's slot. Two guards: a taught region ends at the
+next word on its line, and is placed at the occurrence nearest its caption (both in the
+script, standing in for a reviewer who draws the region beside the caption); and in the
+merge, when the page's reading is a strict part of the slot's, the tighter reading wins
+(`_strictly_within`), otherwise the reviewer's slot wins and displaces the page's fields
+at its place and on its question.
+
+| arm, second set (2,793 fields) | recall | precision |
+|---|---|---|
+| zero-shot | 64.3% | 69.6% |
+| blank + one corrected fill, additive | 74.7% | 70.8% |
+| blank + one corrected fill, override unguarded | 74.0% | 70.6% |
+| **blank + one corrected fill, override guarded** | **82.8%** | **71.2%** |
+
++18.8 on the 216 artefacts with their own template, ±0 on the six without, **155 artefacts
+up, 3 down by one field**. Remaining: 182 misses and 299 wrong values (17.2 points). This
+is the first number on the enrolled track measured the honest way -- taught on one patient,
+scored on another -- and it is nine points below 90 with one correction pass per form.
+
+### Two corrected fills, and where the rest of the loss is
+
+A third fill set (`LARGE_C`, 2,777 fields, a third patient per form, zero-shot 64.9 /
+70.6 -- the third draw to land on the same zero-shot number, so the day's reader is fitted
+to none of them). Taught from the first two sets' fills, scored on the third: **83.3% /
+72.4%**, against 82.8 / 71.2 from one fill. A second correction at the same positions
+replaces the first slot rather than adding evidence, so it is worth half a point; the
+remaining loss is not where-to-look.
+
+After one corrected fill on the second set the PDF half reads **88.1%** and the image
+half **76.3%**. What is left, by artefact kind: misses on taught captions 41 PDF / 112
+image; wrong values on taught captions 112 PDF / 164 image, in three shapes -- a reading
+from elsewhere on the page (51 / 77), the slot reading past the value into the next field
+(32 / 51), a fragment (29 / 36). Three causes with fixes: a photograph of a later packet
+page was matched against every template's *page 0* and read through page 0's slots (the
+thirteen later-page images per set read at 44-72%) -- `registry.match_page` now tries every
+stored master page and the read uses the matched page; a caption just past a slot's edge
+was not recorded as printing and crept into the read ("Chattanooga State") -- the blank's
+printing is recorded with a small margin (`PRINTED_MARGIN`); and OCR glues a caption, its
+rule and the value into one token ("Name_Analise") -- the underscore is treated as the
+seam and each piece judged on its own. The image half's remaining misreads ("42/26/2006",
+"94/49/4950") are Tesseract at 150 dpi, which no reader rule fixes.
+
+### What today's review screen can teach
+
+`--positions detected`: the reviewer confirms values on fields the reader already found,
+and each confirmed field's own region becomes the slot -- no drawing. 1,088 corrections
+against the oracle's 1,489, and the regions are the reader's, wide or wrong where it was.
+Second set: **71.8% / 70.1%** (+7.5), 98 artefacts up, 24 down. Against 82.8% with placed
+regions, that is the measured worth of a draw-a-region control in review: eleven points.
+Until it exists, the PATCH on a field should not teach, because a corrected *value* on a
+field bound to the wrong place would teach the wrong place.
+
+### The corrections track, final for the day
+
+One corrected fill per form, scored on the second set, after page-aware matching, the
+printed-text margin and the glued-caption seam (registry identical after):
+
+| arm, second set (2,793 fields) | recall | precision |
+|---|---|---|
+| zero-shot | 64.3% | 69.6% |
+| blank only (enrolled arm) | ~68 | ~68 |
+| blank + one fill, positions the UI can confirm today | 71.8% | 70.1% |
+| blank + one fill, positions placed beside the caption | **83.9%** | **71.1%** |
+| blank + two fills, third set | 83.3% | 72.4% |
+
+PDF artefacts **88.4%**, images **78.5%**; later packet pages 75–80% where they were
+44–72%. 166 artefacts up, 3 down by one field, the six without a template unchanged.
+154 misses and 296 wrong values remain (16.1 points), the majority on images: Tesseract
+misreads at 150 dpi and readings from elsewhere in the slot's region. The next levers on
+this track, in order of expected value: a draw-a-region control in review (the eleven
+points between "detected" and "placed"); a better OCR engine for photographs
+(PaddleOCR-VL read 77.6% of handwriting where Tesseract read 51%, and is installed); and
+corrections that accumulate rather than replace, so a second fill narrows a region
+instead of moving it.
+
+Matching every stored page of every template made an upload take twelve seconds; only
+page 0 of each template and pages with slots are candidates now, and the geometric fit
+runs for the twenty-five with the most raw descriptor matches (`GEOMETRIC_FIT_POOL`).
+Validated by the final `make bench` below.
+
+### Final `make bench`, 2026-09-14 evening (the shipped build)
+
+| benchmark | result | before today |
+|---|---|---|
+| dev forms (tuned against) | 100.0% recall, 78.6% precision | 100.0% / 73.9% |
+| TEST2 / TEST4 / TEST5 zero-shot | 72.5% / 52.4% / 55.2% | 72.5% / 44.4% / 50.7% |
+| **LARGE zero-shot** | **64.6% / 68.9%** | 61.2% / 58.1% |
+| intake precision (TEST2/4/5) | 64.0% | 54.2% |
+| **LARGE enrolled, blank only** | **68.4% / 68.7%** | 60.0% (−3.9 where applied) |
+| **LARGE_B, one corrected fill per form** | **83.9% / 71.1%** | — (no such mechanism) |
+| FUNSD linking | 17.1% | 18.3% |
+| placement ≤2mm | 78.9% | 78.9% |
+| round-trip | 65.2% | 69.6% |
+
+Registry identical before and after every arm. The pre-filtered matcher reads the enrolled
+arm at 68.4 / 68.7 against 68.3 / 67.8 with exhaustive matching, so the speed-up cost
+nothing. Open, unchanged from the morning: round-trip −1 value (St. Clair "Employer" re-read
+as "Riverside" from the regenerated page) and FUNSD −10 links. Nothing is committed.
+
+## 2026-09-14 (night) — The rest of the plan after the research
+
+The user's instruction: execute everything that was part of the plan after the research.
+Three items were left with a bearing on 90: the photograph half of the corrected track,
+the draw-a-region control the corrections track needs in review, and the research's L3.
+
+### Photograph slots read on their own, enlarged
+
+After one corrected fill the PDF half read 88.4% and the photograph half 78.5%, and the
+photograph failures were Tesseract misreads at 150 dpi inside slots the template already
+knew ("42/26/2006"). Whole-page upscaling is a measured wash (see `word_source`), but a
+slot is not a page: `words_in_region` crops the slot from the page image, enlarges it
+three times and reads it as one block; the reading Tesseract is surer of wins, and an
+empty page reading yields to the crop only when the crop is legible. Applied to every
+template slot on image pages; measured in the corrected arm below.
+
+### Draw a region in review
+
+The review page now teaches the matched template: "Teach template here" sends a field's
+current region and value to `POST /templates/{id}/corrections`; "Place on page" lets the
+reviewer drag a rectangle on the page image for a field the reader missed or misplaced,
+and sends that. Taught regions are drawn dashed. Both appear only once a template has
+matched (or been learned from the form). The PATCH that saves a value still does not
+teach on its own: measured, teaching from the reader's own regions is worth +7.5 and from
+placed regions +19.6, and a corrected value on a misplaced field would teach the wrong
+place.
+
+### L3: the grounded re-linker
+
+`relinker.py`, off unless `RELINK_PROVIDER=ollama` (`qwen2.5:7b-instruct`, Apache-2.0,
+pulled locally, 4.7 GB). Captions the vocabulary knows that the page prints and no reader
+answered are put to the model with the page's lines and their positions quantised to
+percent cells (LMDX's coordinate tokens); the model names a caption's value and the line
+it came from; an answer that is not an exact substring of that line is discarded, a copied
+caption prefix is stripped ("MARITAL STATUS Married" -> "Married"), and what survives is
+admitted only if it passes the readers' own quality test. A model can invent; grounding
+makes an invention a miss, never a wrong value.
+
+First probe, one photographed page the readers missed the e-mail on: 12 grounded answers
+of 16 asked, 5 of them right and new (e-mail, marital status, date of birth, occupation,
+ethnicity), the rest captions the quality test removes. **52 seconds per page** for the
+7B model on this machine, prompt-bound; windowing the prompt to the lines around asked
+captions saved almost nothing because sixteen questions cover the page. Measured on a
+fixed 30-form sample (`LARGE/ground_truth_sample30.json`, 60 artefacts, 847 fields) below.
+
+### A leak, caught: two servers, one template folder
+
+The first re-linker sample came back +24 points on twenty artefacts with only 36 values
+adopted -- impossible -- and the dump showed why: the second measurement server had matched
+the aetna form to `T50`, a template the corrected arm on the other port had just taught
+*from that same fill*, and read it through reviewer slots at 10 of 10. Two backends shared
+`data/templates/`. The derived-template folder is now `DERIVED_TEMPLATES_DIR` when set, so
+a measurement server can be given its own; the sample was re-run in isolation. The rule
+is now in `CLAUDE.md`: one registry per backend, never two measurements against one folder.
+
+### L3 measured, in isolation
+
+Ten-form sample (20 artefacts, 258 fields), `RELINK_PROVIDER=ollama`, its own template
+folder, ten questions a page:
+
+| | recall | precision |
+|---|---|---|
+| base reader | 56.6% | 64.1% |
+| + re-linker, first grounding | 61.2% | 61.2% |
+| + re-linker, tick-row options rejected | **61.2%** | **63.3%** |
+
++12 fields on 4 artefacts, none worse; 27 values adopted, 15 of them a written answer. On
+the aetna form -- a behavioural-health packet the readers read 0 of 10 on -- it grounded
+the name, birth date, e-mail, address, gender and marital status. What it gets wrong is
+now mostly a "none" written under "Medications" that the truth does not list, and an
+option it picked off a row the tick filter did not catch. The cost is the finding that
+decides its place: **thirty to fifty seconds a page** on this machine for the 7B model,
+prompt-bound, so it stays opt-in. Worth revisiting with a smaller Apache-licensed model
+(qwen2.5:1.5b-instruct) or an MLX backend; the mechanism is safe by construction.
+
+### The enlarged slot read, measured
+
+Corrected arm on the second set with photograph slots re-read enlarged: **84.5% / 70.7%**
+against 83.9 / 71.1 without; the photograph half 78.5 → 79.7, PDFs unchanged. 16
+artefacts up by 29 fields, 11 down by 13: the crop's reading wins by Tesseract's own
+confidence, which is occasionally confident about the wrong thing. Kept for the net gain;
+a confidence margin rather than a tie is the obvious next adjustment, unmeasured.
+
+### The review controls, in a browser
+
+Playwright against the dev frontend and the port-8000 backend, 2026-09-14 night: "Learn
+template from this form" on a five-page packet produced a 46-slot template; "Teach
+template here" on Date of Birth answered "Taught T158 (46 slots)" and the template on disk
+carried the slot marked taught with the blank's printing recorded; "Place on page" with a
+dragged rectangle over the City value did the same for City with the drawn region
+(x 0.140, y 0.304, 0.309 wide). Both regions draw dashed on the page. The test template
+was released and the UI backend restarted, because its lazily loaded registry had picked
+up the corrected arm's 108 templates from the shared folder in the meantime -- the same
+leak as above, seen from the other side, and the reason measurement servers now get their
+own `DERIVED_TEMPLATES_DIR`.
+
+### Final `make bench`, 2026-09-14 night (the shipped build)
+
+| benchmark | result | before today |
+|---|---|---|
+| dev forms (tuned against) | 100.0% / 78.6% | 100.0% / 73.9% |
+| TEST2 / TEST4 / TEST5 zero-shot | 72.5% / 52.4% / 55.2% | 72.5% / 44.4% / 50.7% |
+| **LARGE zero-shot** | **64.6% / 68.9%** | 61.2% / 58.1% |
+| intake precision (TEST2/4/5) | 64.0% | 54.2% |
+| **LARGE enrolled, blank only** | **68.5% / 67.9%** (50 artefacts up, none down) | 60.0% (−3.9 where applied) |
+| **LARGE_B, one corrected fill per form** | **84.5% / 70.7%** (PDFs 88.4, photos 79.7) | — |
+| LARGE_B, corrections from the reader's own regions | 71.8% / 70.1% | — |
+| LARGE_C, two corrected fills | 83.3% / 72.4% | — |
+| re-linker, ten-form sample, opt-in | +4.7 recall / −0.8 precision | — |
+| FUNSD linking | 17.1% | 18.3% |
+| placement ≤2mm | 78.9% | 78.9% |
+| round-trip | 65.2% | 69.6% |
+
+Measured on a server with its own `DERIVED_TEMPLATES_DIR`; registry identical before and
+after every arm. Nothing is committed. The user's UI backend on port 8000 runs this build;
+the frontend dev server on port 3000 was started for the browser test and left running.
