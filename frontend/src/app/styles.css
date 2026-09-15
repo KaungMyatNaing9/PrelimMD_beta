@@ -59,3 +59,4 @@ details.history small{opacity:.7}
 .timeline code{background:#f1f5f9;padding:.05rem .3rem;border-radius:3px}
 .changes{margin:.3rem 0 0;padding-left:1.1rem}
 .changes li{padding:.15rem 0}
+.viewer.placing{cursor:crosshair;user-select:none}.viewer.placing img{pointer-events:none}.placing-hint{position:absolute;left:8px;top:8px;margin:0;padding:6px 10px;background:#111c;color:white;border-radius:6px;line-height:1.3;font-size:.85rem}.placing-hint button{margin:0 0 0 6px;padding:2px 8px;font-size:.8rem}article button.teach{margin-left:6px;background:#6e3dc8}

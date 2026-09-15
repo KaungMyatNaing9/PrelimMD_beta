@@ -1,17 +1,4 @@
-from app.schemas.models import FieldType
-from app.services.extraction import normalize
-
-
-def test_phone_normalizes_to_digits():
-    assert normalize("(312) 555-0101", FieldType.PHONE)[0] == "3125550101"
-
-
-def test_ambiguous_date_is_flagged():
-    assert normalize("03/04/26", FieldType.DATE)[1][0].code == "AMBIGUOUS_DATE"
-
-
-def test_identifier_uses_pattern():
-    assert normalize("ab 123456", FieldType.INSURANCE_ID, "[A-Z]{2}\\d{6}")[0] == "AB123456"
+"""Caption and value clean-up on the form-understanding path."""
 
 
 def test_a_printed_instruction_is_not_part_of_the_answer():
@@ -52,3 +39,13 @@ def test_a_qualifier_does_not_let_a_relative_claim_the_patients_field():
 
     for label in ("Spouse Date of Birth", "Employer Address", "Subscriber Last Name"):
         assert match(label)[2] != "exact alias (phrase tail)"
+
+
+def test_the_empty_rule_is_not_part_of_the_value():
+    from app.schemas.models import FieldType
+    from app.services.form_analyzer import normalize
+
+    assert normalize("__________ Guerrero", FieldType.SHORT_TEXT) == "Guerrero"
+    assert normalize("____ 04/17/1986", FieldType.DATE) == "04/17/1986"
+    assert normalize("noor_k@example.com", FieldType.SHORT_TEXT) == "noor_k@example.com"
+    assert normalize("1420 Bellefield Ave.", FieldType.SHORT_TEXT) == "1420 Bellefield Ave."

@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 
@@ -13,11 +14,16 @@ ROOT = Path(__file__).resolve().parents[3]
 # Corpus masters are frozen evaluation ground truth; templates derived at runtime are kept
 # separate so deriving one can never mutate the benchmark.
 TEMPLATE_ROOT = ROOT / "data" / "corpus" / "templates"
-DERIVED_ROOT = ROOT / "data" / "templates"
+# Overridable so that two backends never share one registry: a second measurement server
+# once matched a form to a template the first was teaching from that very form, and
+# scored it through reviewer slots. Every derived template a process makes lands here.
+DERIVED_ROOT = Path(os.getenv("DERIVED_TEMPLATES_DIR") or ROOT / "data" / "templates")
 TEMPLATE_ROOTS = (TEMPLATE_ROOT, DERIVED_ROOT)
 
 # Below this many geometrically-consistent matches, a "match" is noise.
 MIN_GEOMETRIC_MATCHES = 8
+# How many of the best-matching candidate pages get the geometric fit.
+GEOMETRIC_FIT_POOL = 25
 GEOMETRIC_MATCH_POOL = 300
 # Measured separation is wide: an unrelated form scores ~0.04, the right template ~1.0.
 MATCH_THRESHOLD = 0.5
@@ -86,9 +92,15 @@ def release(template_id: str) -> bool:
 class TemplateRegistry:
     def __init__(self) -> None:
         self._templates: dict[str, TemplateDefinition] = {}
+        # ORB keypoints and descriptors of each master, computed once per template rather
+        # than once per upload per template. With fifty templates registered, recomputing
+        # them made every analysis take fifteen seconds instead of two, all of it spent
+        # re-reading and re-describing the same fifty images.
+        self._features: dict[str, tuple[list, np.ndarray]] = {}
 
     def load(self) -> None:
         self._templates = {}
+        self._features = {}
         for root in TEMPLATE_ROOTS:
             for path in root.glob("T*/template.json"):
                 definition = TemplateDefinition.model_validate_json(path.read_text())
@@ -107,7 +119,19 @@ class TemplateRegistry:
     def match(
         self, image: np.ndarray, hint: str | None = None
     ) -> tuple[TemplateDefinition | None, float]:
-        """Identify the template a page came from, with its measured confidence.
+        """Identify the template a page came from, with its measured confidence."""
+        definition, _, score = self.match_page(image, hint)
+        return definition, score
+
+    def match_page(
+        self, image: np.ndarray, hint: str | None = None
+    ) -> tuple[TemplateDefinition | None, int, float]:
+        """Identify the template a page came from, and *which page* of it.
+
+        A photograph of page 3 of a packet was matched against every template's page 0
+        and, when it matched at all, read through page 0's slots: on the benchmark the
+        thirteen later-page images read at 44-72% against 78% for first pages. Every
+        stored master page is a candidate now.
 
         A ``hint`` narrows the search to one template; it does **not** assert a match.
         The returned score is always measured against the image, so a caller naming the
@@ -121,7 +145,7 @@ class TemplateRegistry:
             try:
                 candidates = [self.get(hint)]
             except KeyError:
-                return None, 0.0
+                return None, 0, 0.0
         else:
             candidates = self.all()
 
@@ -130,31 +154,63 @@ class TemplateRegistry:
         orb = cv2.ORB_create(1200)
         keys, desc = orb.detectAndCompute(gray, None)
         if desc is None:
-            return None, 0.0
+            return None, 0, 0.0
         matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        best: tuple[TemplateDefinition | None, float] = (None, 0.0)
+        # Every template's first page identifies a packet; a later page is a candidate
+        # only if it has slots, since an empty page cannot be read through anyway. The
+        # geometric fit is the expensive part (~20 ms each), so it runs only for the
+        # candidates with the most raw descriptor matches: with 108 templates and up to
+        # five pages each, fitting every page took twelve seconds per upload.
+        pool = []
         for definition in candidates:
-            master = cv2.imread(str(canonical_image_path(definition.template_id)))
+            for page in definition.pages:
+                if page.page_index and not page.fields:
+                    continue
+                features = self._master_features(definition.template_id, page.page_index, orb)
+                if features is None:
+                    continue
+                mk, md = features
+                matches = matcher.match(desc, md)
+                pool.append((len(matches), definition, page.page_index, matches, mk))
+        pool.sort(key=lambda item: item[0], reverse=True)
+        best: tuple[TemplateDefinition | None, int, float] = (None, 0, 0.0)
+        for _, definition, page_index, matches, mk in pool[:GEOMETRIC_FIT_POOL]:
+            score = _geometric_score(matches, keys, mk)
+            if score > best[2]:
+                best = (definition, page_index, score)
+        return best
+
+    def _master_features(
+        self, template_id: str, page_index: int, orb
+    ) -> tuple[list, np.ndarray] | None:
+        key = f"{template_id}/{page_index}"
+        if key not in self._features:
+            master = cv2.imread(str(canonical_image_path(template_id, page_index)))
             if master is None:
-                continue
+                return None
             mk, md = orb.detectAndCompute(cv2.cvtColor(master, cv2.COLOR_BGR2GRAY), None)
             if md is None:
-                continue
-            score = _geometric_score(matcher.match(desc, md), keys, mk)
-            if score > best[1]:
-                best = (definition, score)
-        return best
+                return None
+            self._features[key] = (mk, md)
+        return self._features[key]
 
 
 registry = TemplateRegistry()
 
 
-def canonical_image_path(template_id: str) -> Path:
+def preview_name(page_index: int) -> str:
+    """Page 0 keeps the plain name so every template learned before pages existed
+    still resolves; later pages are numbered."""
+    return "blank_preview.png" if page_index == 0 else f"blank_preview_p{page_index}.png"
+
+
+def canonical_image_path(template_id: str, page_index: int = 0) -> Path:
+    name = preview_name(page_index)
     for root in TEMPLATE_ROOTS:
-        candidate = root / template_id / "blank_preview.png"
+        candidate = root / template_id / name
         if candidate.exists():
             return candidate
-    return TEMPLATE_ROOT / template_id / "blank_preview.png"
+    return TEMPLATE_ROOT / template_id / name
 
 
 def align_to_template(image: np.ndarray, template_id: str) -> tuple[np.ndarray, float]:

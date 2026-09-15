@@ -25,15 +25,16 @@ from app.schemas.form_understanding import DetectedFormField, FormAnalysis, Requ
 from app.schemas.models import (
     BoundingBox,
     FieldType,
+    SlotCorrection,
     TemplateDefinition,
     TemplateField,
     TemplatePage,
 )
 from app.services.canonical_registry import match, norm
 from app.services.field_layout import split_runs
-from app.services.form_analyzer import geometric_fields
+from app.services.form_analyzer import geometric_fields, widget_boxes
 from app.services.regeneration import label_key
-from app.services.templates import DERIVED_ROOT, registry
+from app.services.templates import DERIVED_ROOT, preview_name, registry
 from app.services.vision_extractor import available as vision_available
 from app.services.vision_extractor import extract as vision_extract
 from app.services.vision_extractor import locate_values
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 MAX_ERASABLE_AREA_FRACTION = 0.12
 
 DERIVED_ID_START = 50
-DERIVED_ID_END = 99
+DERIVED_ID_END = 9999
 
 
 def next_template_id() -> str:
@@ -190,6 +191,34 @@ def _slot_from_reading(reading, box) -> DetectedFormField:
     )
 
 
+# How far beyond a slot's edge the blank's printing is still recorded, as a fraction of
+# the page. OCR of a filled copy draws the neighbouring caption's box a little wider than
+# the blank's, so a caption sitting just past the edge crept into the read ("Chattanooga
+# State") and was not known to be printing. Recording it costs nothing: no answer equals
+# the caption beside it.
+PRINTED_MARGIN = 0.012
+
+
+def _printed_inside(bbox, words, page_w: float, page_h: float) -> str | None:
+    """The text the page prints inside a region (and a hair beyond it), in reading order.
+
+    Learned from the blank, this is the region's furniture; a filled copy read through
+    the same region can subtract it. Only what a template is learned from is trusted here:
+    a template derived from a *filled* form would record that patient's answers as
+    printing and erase the next patient's, which is why enrolment starts from the blank.
+    """
+    m = PRINTED_MARGIN
+    inside = [
+        z
+        for z in words
+        if bbox.x - m <= ((z.x0 + z.x1) / 2) / page_w <= bbox.x + bbox.width + m
+        and bbox.y - m / 2 <= ((z.y0 + z.y1) / 2) / page_h <= bbox.y + bbox.height + m / 2
+        and z.text.strip()
+    ]
+    text = " ".join(z.text for z in sorted(inside, key=lambda z: (round(z.y0), z.x0)))
+    return text or None
+
+
 def _text_indent(bbox, words, page_w: float, page_h: float) -> float | None:
     """How far in from a region's left edge its text began, as a fraction of page width."""
     inside = [
@@ -286,21 +315,29 @@ def derive_template(
 ) -> TemplateDefinition:
     """Build and persist a template from an analysed form, then register it.
 
+    Every page is learned, not only the first. These are packets -- a welcome letter, a
+    HIPAA notice and a financial policy commonly sit *ahead of* the registration page --
+    and learning page 0 alone left 36 of 85 benchmark blanks "not derivable" while the
+    rest read their filled copies through a letter. A page without answer regions is kept
+    as an empty page so that indexes line up: a filled copy of a packet keeps the packet's
+    page order, which is what lets each filled page be read through the blank's matching
+    page.
+
     Only fields the analyser located as boxes are usable: an inline "label: value" match
     describes where the text happened to sit, not where the form provides space for it.
     """
-    # Always the geometric view, never the analysis's own fields: on a ruled form the
-    # inline reader usually wins, and its answer boxes describe where one patient's text
-    # landed rather than where the form provides space.
-    boxed = geometric_fields(page_image)
-    boxed = _named_by_model(boxed, page_image)
-    found = len(boxed)
-    # A field the vocabulary can name is keepable however it is worded: a caption phrased
-    # as an instruction -- "Please check the box(es) that describe your race" -- is eight
-    # words long and is a real field, and the length test alone threw two working slots
-    # out of the round trip.
-    boxed = [f for f in boxed if f.canonical_key or _is_a_caption(f.label_text)]
-    if not boxed:
+    folder = page_image.parent
+    pdf = folder / "source.pdf"
+    images = [page_image] + [
+        folder / f"page_{index}.png" for index in range(1, max(1, len(analysis.pages)))
+    ]
+    learned = [
+        _learn_page(image, index, pdf if pdf.exists() else None)
+        for index, image in enumerate(images)
+        if image.exists()
+    ]
+    if not any(page.fields for page, _, _ in learned):
+        found = sum(count for _, _, count in learned)
         raise ValueError(
             "No answer regions were detected on this form, so a template cannot be "
             "derived from it. The page may be too low-contrast for its rules to be found."
@@ -310,23 +347,51 @@ def derive_template(
             "template built from them could never be refilled."
         )
 
+    template_id = next_template_id()
+    out = DERIVED_ROOT / template_id
+    out.mkdir(parents=True, exist_ok=True)
+    for page, blank, _ in learned:
+        cv2.imwrite(str(out / preview_name(page.page_index)), blank)
+    definition = TemplateDefinition(
+        template_id=template_id,
+        template_name=template_name or f"Derived from {analysis.analysis_id}",
+        version=1,
+        page_count=len(learned),
+        pages=[page for page, _, _ in learned],
+    )
+    (out / "template.json").write_text(definition.model_dump_json(indent=2))
+    registry.load()
+    return definition
+
+
+def _learn_page(
+    page_image: Path, index: int, pdf: Path | None
+) -> tuple[TemplatePage, np.ndarray, int]:
+    """One page's slots, its blank master, and how many regions were found at all."""
+    # Always the geometric view, never the analysis's own fields: on a ruled form the
+    # inline reader usually wins, and its answer boxes describe where one patient's text
+    # landed rather than where the form provides space. A fillable PDF's own widgets are
+    # the designer's answer spaces and take precedence over anything inferred.
+    # Read once: the same words serve the geometry and, below, the size measurement.
+    page_words = words_from_image(page_image, settings.ocr_language)
+    boxed = geometric_fields(page_image, widget_boxes(pdf, index) if pdf else None, page_words)
+    boxed = _named_by_model(boxed, page_image)
+    found = len(boxed)
+    # A field the vocabulary can name is keepable however it is worded: a caption phrased
+    # as an instruction -- "Please check the box(es) that describe your race" -- is eight
+    # words long and is a real field, and the length test alone threw two working slots
+    # out of the round trip.
+    boxed = [f for f in boxed if f.canonical_key or _is_a_caption(f.label_text)]
+
     image = cv2.imread(str(page_image))
     if image is None:
         raise FileNotFoundError(f"Cannot read page image {page_image}")
     height, width = image.shape[:2]
-
-    template_id = next_template_id()
-    folder = DERIVED_ROOT / template_id
-    folder.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(
-        str(folder / "blank_preview.png"),
-        blank_from_filled(image, [f.answer_bbox for f in boxed]),
-    )
+    blank = blank_from_filled(image, [f.answer_bbox for f in boxed])
 
     # The values are still on the page at this point -- ``blank_from_filled`` erases them
     # only for the stored master -- so the size the form was actually filled at can be
     # measured here, and is what regeneration should reproduce.
-    page_words = words_from_image(page_image, settings.ocr_language)
     # One size for the whole page, not one per field. A form is filled at a single size,
     # and the per-field measurement is only as good as what happens to sit in that
     # field's region: a rule's writable band also contains the captions printed under
@@ -370,21 +435,80 @@ def derive_template(
                 bbox=field.answer_bbox,
                 font_size=fill_size,
                 text_indent=_text_indent(field.answer_bbox, page_words, width, height),
+                printed_text=_printed_inside(field.answer_bbox, page_words, width, height),
                 review_threshold=0.75,
             )
         )
-
-    definition = TemplateDefinition(
-        template_id=template_id,
-        template_name=template_name or f"Derived from {analysis.analysis_id}",
-        version=1,
-        page_count=1,
-        pages=[
-            TemplatePage(
-                page_index=0, canonical_width=width, canonical_height=height, fields=fields
-            )
-        ],
+    page = TemplatePage(
+        page_index=index, canonical_width=width, canonical_height=height, fields=fields
     )
+    return page, blank, found
+
+
+def learn_corrections(
+    template_id: str, corrections: list[SlotCorrection]
+) -> TemplateDefinition:
+    """Teach a template where a reviewer says its answers live.
+
+    The blank form says where a form *offers* space; a reviewer looking at a filled copy
+    says where an answer *is*, and the second is what the stacked and sub-captioned rows
+    that geometry keeps missing need. This is the enrolled track's route past what a
+    blank can teach: the second, third and fifth filled copies of a form are free, because
+    a receptionist correcting one teaches its template.
+
+    A correction names the caption, the page and the region. The slot takes the
+    vocabulary's key for the caption where it knows it, so values resolve on regeneration,
+    and replaces an earlier slot with the same key on that page -- the reviewer's word
+    beats the geometry's guess. What the blank prints inside the new region is read from
+    the stored master, so a later read subtracts it like any other slot's.
+    """
+    definition = registry.get(template_id).model_copy(deep=True)
+    folder = DERIVED_ROOT / template_id
+    if not folder.is_dir():
+        raise ValueError(f"{template_id} is not a derived template; corpus masters are not taught")
+    pages = {page.page_index: page for page in definition.pages}
+    words_by_page: dict[int, tuple[list, int, int] | None] = {}
+    for correction in corrections:
+        if correction.page_index not in pages:
+            # Packets keep their page order; a page the blank taught nothing about still
+            # has an index, sized like the last page learned.
+            last = definition.pages[-1]
+            for index in range(len(definition.pages), correction.page_index + 1):
+                page = TemplatePage(
+                    page_index=index,
+                    canonical_width=last.canonical_width,
+                    canonical_height=last.canonical_height,
+                    fields=[],
+                )
+                definition.pages.append(page)
+                pages[index] = page
+        page = pages[correction.page_index]
+        mapped, _, _ = match(correction.label)
+        field_id = mapped.canonical_key if mapped else label_key(correction.label)
+        if correction.page_index not in words_by_page:
+            master = folder / preview_name(correction.page_index)
+            if master.exists():
+                image = cv2.imread(str(master))
+                words_by_page[correction.page_index] = (
+                    (words_from_image(master, settings.ocr_language), image.shape[1], image.shape[0])
+                    if image is not None
+                    else None
+                )
+            else:
+                words_by_page[correction.page_index] = None
+        known = words_by_page[correction.page_index]
+        printed = _printed_inside(correction.bbox, *known) if known else None
+        slot = TemplateField(
+            field_id=field_id,
+            label=correction.label,
+            field_type=mapped.value_type if mapped else FieldType.SHORT_TEXT,
+            bbox=correction.bbox,
+            printed_text=printed,
+            taught=True,
+            review_threshold=0.75,
+        )
+        page.fields = [f for f in page.fields if f.field_id != field_id] + [slot]
+    definition.page_count = len(definition.pages)
     (folder / "template.json").write_text(definition.model_dump_json(indent=2))
     registry.load()
     return definition

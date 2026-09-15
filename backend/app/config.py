@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     vision_model: str = ""
     vision_api_key: str = ""
     vision_timeout_seconds: int = Field(default=120, ge=5, le=600)
+    # How the boxed and inline readers are reconciled on a page. "assign" pools both
+    # readers' proposals and takes them best-first with every run of words serving once,
+    # so a reader that binds captions as answers cannot win by volume; "best" is the
+    # older rule, whichever reader answered more fields, whole page at a time. Measured
+    # on the same build, 2026-09-14: LARGE 61.2 -> 64.6 recall and 58.1 -> 67.8 precision;
+    # TEST4 +8.0 and TEST5 +4.5 on recall, TEST2 level, FUNSD down ten links of 812.
+    # Kept switchable so the two can always be measured against each other.
+    layout_choice: str = "assign"
+    # A local text model that links captions the page prints to values no reader answered,
+    # with every answer grounded to an exact line of the page or discarded. "disabled" or
+    # "ollama" (qwen2.5:7b-instruct, Apache-2.0, pulled locally). Off until measured.
+    relink_provider: str = "disabled"
+    relink_model: str = ""
+    relink_timeout_seconds: int = Field(default=120, ge=5, le=600)
 
 
 settings = Settings()

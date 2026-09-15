@@ -260,6 +260,67 @@ def _words_from_tesseract(image_path: Path, language: str) -> list[Word]:
     return _drop_rule_artifacts(_strip_box_glyphs(_split_glued_labels(words)))
 
 
+# A slot's region read on its own, enlarged. Whole-page upscaling is a wash (above), but a
+# single answer's region is not a page: enlarging a 150dpi crop of "12/26/2006" three
+# times before reading it is what turns "42/26/2006" back into a date. Only slots learned
+# for a template are read this way, so the cost is a few small OCR calls per photograph.
+REGION_SCALE = 3
+REGION_MARGIN = 0.15
+
+
+def words_in_region(
+    image_path: Path, box: tuple[float, float, float, float], language: str
+) -> list[Word]:
+    """Words read from one region of a page image, enlarged, in page pixel coordinates.
+
+    ``box`` is ``(x0, y0, x1, y1)`` in the image's pixels. The crop takes a margin so a
+    glyph on the boundary is not cut in half, and is read as one block of text (Tesseract
+    page segmentation 6), which serves a one-line answer and a two-line address alike.
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - dependency guard
+        raise HTTPException(503, "OCR dependency pytesseract is unavailable") from exc
+
+    page = Image.open(image_path)
+    x0, y0, x1, y1 = box
+    pad = REGION_MARGIN * max(1.0, y1 - y0)
+    left, top = max(0, int(x0 - pad)), max(0, int(y0 - pad))
+    right, bottom = min(page.width, int(x1 + pad) + 1), min(page.height, int(y1 + pad) + 1)
+    if right - left < 4 or bottom - top < 4:
+        return []
+    crop = page.crop((left, top, right, bottom))
+    crop = crop.resize((crop.width * REGION_SCALE, crop.height * REGION_SCALE), Image.LANCZOS)
+    try:
+        data = pytesseract.image_to_data(
+            crop, lang=language, config="--psm 6", output_type=pytesseract.Output.DICT
+        )
+    except pytesseract.TesseractNotFoundError as exc:
+        raise HTTPException(
+            503, "Image OCR requires the local Tesseract binary (brew install tesseract)"
+        ) from exc
+    found = []
+    for i, text in enumerate(data["text"]):
+        confidence = float(data["conf"][i])
+        if not text.strip() or confidence < 0:
+            continue
+        wx = left + float(data["left"][i]) / REGION_SCALE
+        wy = top + float(data["top"][i]) / REGION_SCALE
+        found.append(
+            Word(
+                wx,
+                wy,
+                wx + float(data["width"][i]) / REGION_SCALE,
+                wy + float(data["height"][i]) / REGION_SCALE,
+                text,
+                int(data["block_num"][i]),
+                confidence / 100,
+            )
+        )
+    return _drop_rule_artifacts(_strip_box_glyphs(_split_glued_labels(found)))
+
+
 RULE_RUN = re.compile(r"(_{3,})")
 RULE_ONLY = re.compile(r"^_+$")
 # OCR reads an empty tick box as bracket-ish glyphs, and they arrive glued to the option
