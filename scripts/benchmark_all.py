@@ -1,8 +1,11 @@
-"""Every benchmark this project reports, in one run, with the registry checked.
+"""The benchmark this project reports, in one run, with the registry checked.
 
-Numbers get skipped when running them is a matter of remembering to. FUNSD was set up as
-the yardstick and then went unmeasured across three changes to the reader, because it sat
-outside the handful of commands run by habit. Anything quoted in `CLAUDE.md` belongs here.
+The benchmark is `data/real-forms/LARGE/`: 112 real clinic forms, 222 artefacts, 2,775
+fields, a distinct invented patient per form (user, 2026-09-14: "the 100+ real forms ...
+should be the main"). By default this runs its zero-shot arm and its enrolled arm and
+nothing else. FUNSD, the small TEST sets, the dev forms, intake precision, placement and
+round-trip run only with `--extras`, and only when the user asks for them (user,
+2026-09-15: "Don't test FUNSD anymore unless I tell you to, only the 100+ forms").
 
 Two things it enforces that ad-hoc runs do not:
 
@@ -13,11 +16,9 @@ Two things it enforces that ad-hoc runs do not:
   extractor that emits nothing, and recall is trivially high for one that emits everything,
   so either alone can be improved by making the product worse.
 
-    python scripts/benchmark_all.py [--api ...] [--quick]
+    python scripts/benchmark_all.py [--api ...] [--quick] [--extras] [--keep DIR]
 
-`--quick` skips regeneration, FUNSD and the enrolled LARGE arm, which are the slow ones
-(~4, ~3 and ~45 minutes). The zero-shot LARGE arm (~10 minutes) always runs: it is the
-benchmark, and it went unmeasured by this runner for a day because it was not here.
+`--quick` runs the zero-shot arm only (~10 minutes); the enrolled arm takes ~45 minutes.
 """
 
 import argparse
@@ -70,7 +71,10 @@ def templates(api: str) -> list[str] | None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", default="http://127.0.0.1:8000")
-    parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--quick", action="store_true", help="the zero-shot LARGE arm only")
+    parser.add_argument("--extras", action="store_true",
+                        help="also the dev forms, TEST2/4/5, intake precision, FUNSD, "
+                        "placement and round-trip -- only when the user asks for them")
     parser.add_argument("--keep", default=None,
                         help="directory to keep every benchmark's full output in")
     parser.add_argument("--parallel", type=int, default=4,
@@ -88,25 +92,11 @@ def main() -> int:
         return 1
     rows: list[tuple[str, str, str]] = []
 
-    print("dev forms (regression check only -- tuned against, not evidence)", flush=True)
-    rows.append(("dev forms", find(run("evaluate_real_forms.py", "--api", args.api, *workers),
-                                   r"ACCURACY .*= ([\d.]+%)"), "recall"))
-    for name in ("TEST2", "TEST4", "TEST5"):
-        print(f"{name} recall", flush=True)
-        rows.append((f"{name} zero-shot",
-                     find(run("evaluate_real_forms.py", "--api", args.api,
-                              "--truth", f"{name}/ground_truth_new.json", *workers),
-                          r"ACCURACY .*= ([\d.]+%)"), "recall"))
-
     print("LARGE zero-shot (the benchmark, ~10 minutes)", flush=True)
     large = run("evaluate_real_forms.py", "--api", args.api,
                 "--truth", "LARGE/ground_truth_new.json", *workers)
     rows.append(("LARGE zero-shot", find(large, r"ACCURACY .*= ([\d.]+%)"), "recall"))
     rows.append(("LARGE precision", find(large, r"PRECISION .*= ([\d.]+%)"), "precision"))
-
-    print("intake precision", flush=True)
-    precision = run("intake_field_coverage.py", "--api", args.api)
-    rows.append(("intake precision", find(precision, r"= ([\d.]+%) precision"), "precision"))
 
     if not args.quick:
         print("LARGE enrolled (learn every blank, read through it, release; ~45 minutes)",
@@ -115,7 +105,21 @@ def main() -> int:
         rows.append(("LARGE enrolled", find(enrolled, r"ACCURACY .*= ([\d.]+%)"), "recall"))
         rows.append(("LARGE enrolled prec.", find(enrolled, r"PRECISION .*= ([\d.]+%)"),
                      "precision"))
-        print("FUNSD linking (the yardstick -- measure, never tune against)", flush=True)
+
+    if args.extras:
+        print("dev forms (regression check only -- tuned against, not evidence)", flush=True)
+        rows.append(("dev forms", find(run("evaluate_real_forms.py", "--api", args.api, *workers),
+                                       r"ACCURACY .*= ([\d.]+%)"), "recall"))
+        for name in ("TEST2", "TEST4", "TEST5"):
+            print(f"{name} recall", flush=True)
+            rows.append((f"{name} zero-shot",
+                         find(run("evaluate_real_forms.py", "--api", args.api,
+                                  "--truth", f"{name}/ground_truth_new.json", *workers),
+                              r"ACCURACY .*= ([\d.]+%)"), "recall"))
+        print("intake precision", flush=True)
+        precision = run("intake_field_coverage.py", "--api", args.api)
+        rows.append(("intake precision", find(precision, r"= ([\d.]+%) precision"), "precision"))
+        print("FUNSD linking (only when asked)", flush=True)
         funsd = run("evaluate_funsd.py", "--api", args.api)
         rows.append(("FUNSD linking", find(funsd, r"= ([\d.]+%) of annotated"), "recall"))
         print("placement", flush=True)

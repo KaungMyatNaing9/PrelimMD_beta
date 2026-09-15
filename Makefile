@@ -1,4 +1,4 @@
-.PHONY: backend-install backend-dev frontend-install frontend-dev test lint typecheck db-up corpus evaluate smoke
+.PHONY: backend-install backend-dev frontend-install frontend-dev test lint typecheck db-up smoke bench bench-quick bench-extras
 
 PYTHON ?= python3.12
 VENV ?= .venv312
@@ -20,6 +20,8 @@ bench:
 	$(PY) scripts/benchmark_all.py
 bench-quick:
 	$(PY) scripts/benchmark_all.py --quick
+bench-extras:
+	$(PY) scripts/benchmark_all.py --extras
 lint:
 	cd backend && ../$(PY) -m ruff check app tests
 	cd frontend && npm run lint
