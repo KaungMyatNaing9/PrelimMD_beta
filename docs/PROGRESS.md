@@ -2736,6 +2736,7 @@ layer at all ("1 0 / 1 0 /" then "02/22/2026"); the truth cannot be read from th
 | **model + every rule above + form date + run end** (cached sheets, same templates) | **92.1%** | **72.0%** | **92.9** | **91.1** |
 | form date + run end, no model, on the fairer oracle's templates (against 86.6 on the same templates) | 89.6 | 70.7 | 92.9 | 85.6 |
 | model, strip-border fixes as first written (part-of-OCR rule, full stop as fragment) | 91.2 | 71.9 | 92.4 | 89.8 |
+| **model, glued-letter split only (commit 8ba3fbc)** | **92.5%** | **72.0%** | 92.9 | **92.1** |
 
 **Zero-shot did not pay for any of it.** The reader change (one-word captions) and the
 vocabulary key touch every track, so the zero-shot geometry bench was re-run on the day's
@@ -2747,7 +2748,9 @@ reading whenever the model's is a part of it blocked the model's correction of a
 fragment in front of the value ("ress, Fresno", "Person Zephyr Beauchamp"), which is the
 common case, to save "Anselm Ashworth" twice; and the fragment rule counted "Dr." as a
 caption's tail, so twelve physicians lost their title. Both reverted; the glued-letter
-split ("yPortland", "eCT", "p04101") stays, and is re-measured from the cache.
+split ("yPortland", "eCT", "p04101") stays: re-measured from the cache it is +12 fields
+and −0 against 92.1, so **the committed code reads the corrected track at 92.5 / 72.0**
+(+205 / −7 fields against the morning's 85.4, photographs 80.9 → 92.1).
 
 The sheet reader's arm ran on the code of 11:48 (whole-word containment and the
 label-only caption cut, before the printing ring and the printed-word cuts), so its
@@ -2812,4 +2815,16 @@ the working memory carry the lock: score it, quote totals only through
 `scripts/unseen_summary.py`, never open a form, a page image, a dump or a FAIL line.
 Nothing in the reader has seen them; nothing will be tuned against them. Measured on
 port 8015 with the day's code, zero-shot first and then the corrected track (teach on A,
-score on B, model on); numbers below when they land.
+score on B, model on), totals only:
+
+| unseen set, 21 forms, 40 artefacts | recall | precision | PDF | photographs |
+|---|---|---|---|---|
+| zero-shot, geometry only (LARGE: 67.1 / 68.9) | 57.4% | 63.5% | 61.4 | 52.4 |
+| **one corrected fill per form, model on** (LARGE: 92.1 / 72.0) | **88.9%** | **64.0%** | 88.5 | 89.4 |
+
+So the corrected track carries to layouts nobody tuned against at 88.9 recall, three
+points under LARGE's 92.1, and precision is where the gap is wider (64.0 against 72.0,
+PDFs 60.1): the reader proposes more junk on new layouts than on the ones it was measured
+against all day. Zero-shot is ten points under LARGE's, which is what a set the rules were
+never fitted to should show. Nothing in the set was opened, and nothing will be tuned
+against it; the next unseen number comes from re-running these two commands.
