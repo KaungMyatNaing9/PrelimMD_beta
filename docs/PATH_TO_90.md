@@ -66,7 +66,7 @@ filename).
 | hybrid (ollama qwen2.5vl:7b) | not yet measured on LARGE | — |
 | enrolled, 85 forms | **60.0%** overall; own-blank forms 64.9 → 61.1 (**−3.9**), others ±0 | 2026-09-13 |
 | enrolled, 112 forms, after L1 (additive merge, every page, widgets, blank subtracted) | **68.3%**, precision **67.8%**; own-blank 64.4 → 68.2 (**+3.7**), others ±0 | 2026-09-14 |
-| enrolled + one corrected fill per form, scored on a second fill (LARGE_B) | **84.5%**, precision **70.7%**; PDFs 88.4, photos 79.7 | 2026-09-14 |
+| enrolled + one corrected fill per form, scored on a second fill (LARGE_B) | **85.1%**, precision **70.8%**; PDFs 89.5, photos 79.9 | 2026-09-15 |
 
 Smaller sets, for reference (these are the historical figures):
 
@@ -263,7 +263,7 @@ These rules exist because each was learned by getting a number wrong.
 | G2 | hybrid measured on all forms | next |
 | G3 | enrolment measured on all 85 (**B1**) | ~~negative~~ **re-measured 2026-09-14 after L1: +4.4 on the 216 artefacts with their own template, ±0 on the rest** (108 of 112 blanks enrolled) |
 | G4 | zero-shot ≥80%, precision ≥70% | **revised to ≥70–75% / ≥70%**; 2026-09-14 after L2: **64.6% / 67.8%** (from 61.2 / 58.1) |
-| G5 | enrolled ≥90%, precision ≥70% | **84.5% / 70.7%** with one corrected fill per form, measured on a second fill (2026-09-14); precision met, recall five and a half points short; the draw-a-region control now exists in review; next: a better OCR engine for photographs, corrections that accumulate |
+| G5 | enrolled ≥90%, precision ≥70% | **85.1% / 70.8%** with one corrected fill per form, measured on a second fill (2026-09-15); precision met, recall five points short; the draw-a-region control exists in review; the hybrid (vision on) is the strongest remaining lever, measured +5.4 on a sample |
 
 **No lever is adopted on one set.** The pattern that keeps repeating is a change that wins
 on the set it was developed against and loses elsewhere — rapidocr, self-templating,
