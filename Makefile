@@ -28,9 +28,5 @@ typecheck:
 	cd frontend && npm run typecheck
 db-up:
 	docker compose up -d postgres
-corpus:
-	$(PY) scripts/create_synthetic_sample.py
-evaluate:
-	$(PY) scripts/evaluate_corpus.py --split validation
 smoke:
 	./scripts/smoke.sh
