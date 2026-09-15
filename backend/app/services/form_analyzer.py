@@ -165,6 +165,8 @@ def _mean_confidence(words: list[Word]) -> float:
 # A caption is a caption; past this many words it is a sentence, and a reader that has
 # bound a value to a sentence has bound it to the form's instructions.
 MAX_CAPTION_WORDS = 6
+# How much surer an enlarged crop's reading must be than the page's to replace it.
+CROP_MARGIN = 0.05
 
 
 def _is_question_tail(value) -> bool:
@@ -2027,8 +2029,11 @@ def _read_with_template(
                 settings.ocr_language,
             )
             region = _without_printed(region, slot.printed_text)
+            # The crop replaces the page's reading only when it is clearly surer: on a tie
+            # the two readings are as good as each other and the page's is the one every
+            # other rule was measured against.
             if region and _mean_confidence(region) >= (
-                _mean_confidence(inside) if inside else MIN_LEGIBLE
+                _mean_confidence(inside) + CROP_MARGIN if inside else MIN_LEGIBLE
             ):
                 inside = region
         answer = strip_instruction(

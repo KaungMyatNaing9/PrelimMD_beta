@@ -2627,3 +2627,7 @@ track ends the night at **85.1% / 70.8%**, the enrolled arm at 68.8 / 67.9, zero
 without a new reason. The hybrid pass continues from its cache; whatever fraction of the
 112 forms it has read by morning is in `artifacts/hybrid_large_zero_shot.txt` once the
 scorer exits, and its per-artefact dumps are readable before that.
+7. **A confidence margin before a crop reading replaces the page's** (`CROP_MARGIN`
+   0.05; a tie no longer goes to the crop): **kept**. 85.1 / 70.8 → **85.4 / 70.7**,
+   eleven artefacts up and one down, photographs +1.0. The night's corrected-track figure
+   is 85.4 / 70.7 on the second fill set.
