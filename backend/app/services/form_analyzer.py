@@ -1743,7 +1743,7 @@ class FormAnalyzer:
                         warnings.append(f"Re-linker unavailable: {type(exc).__name__}")
                     else:
                         read = _adopt_relinked(read, found, source.width, source.height)
-            if vision_available():
+            if vision_available() and _worth_a_model_call(read, source.words):
                 try:
                     read = fuse(
                         read,
@@ -2098,6 +2098,23 @@ def _without_printed(words: list[Word], printed: str | None) -> list[Word]:
         if surviving:
             kept.append(word if surviving == [word.text] else word._replace(text=" ".join(surviving)))
     return kept
+
+
+def _worth_a_model_call(fields: list[DetectedFormField], words: list[Word]) -> bool:
+    """Whether a page has anything a model could read a value from.
+
+    Packets open with a welcome letter, a HIPAA notice and a financial policy, and the
+    vision model reads each at the same cost as the registration page -- minutes apiece
+    on this machine. A page on which geometry found no field and that prints no caption
+    the vocabulary knows is not asking anything; a page that does either gets the model.
+    """
+    if fields:
+        return True
+    lines = [" " + norm(" ".join(z.text for z in row)) + " " for row in group_lines_tolerant(words)]
+    return any(
+        len(caption) >= 3 and any(f" {caption} " in line for line in lines)
+        for caption in known_captions()
+    )
 
 
 def _unanswered_captions(fields: list[DetectedFormField], words: list[Word]) -> list[str]:
