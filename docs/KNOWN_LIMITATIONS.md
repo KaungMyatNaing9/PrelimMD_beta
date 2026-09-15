@@ -5,10 +5,10 @@ re-run. Where a number would flatter the system, the caveat is given with it.
 
 ## How accuracy is measured, and why the obvious number is not used
 
-The synthetic corpus (`data/corpus/`) reads **96.9%**. That number should not be quoted.
-Every sample in it is a clean render of a layout the extractor was tuned against. On the
-day both were first measured, the corpus read 96.9% while real clinic forms read 45%. The
-corpus is kept only as a regression check that a change has not broken something.
+A synthetic corpus once read **96.9%**; every sample in it was a clean render of a layout
+the extractor was tuned against, and on the day both were first measured real clinic forms
+read 45%. It was deleted on 2026-09-13 so that number can no longer be produced, let alone
+quoted.
 
 Reported accuracy comes from real clinic forms downloaded from public clinic websites
 (`scripts/evaluate_real_forms.py`).

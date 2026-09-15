@@ -84,8 +84,9 @@ If none matched, **Learn template from this form** derives one from the upload.
 
 ## Measuring it
 
-Accuracy is reported from real clinic forms, never from the synthetic corpus — the corpus
-is a regression check only, and reads far higher than reality. See
+Accuracy is reported from real clinic forms only. The synthetic corpus that once served as
+a regression check was removed on 2026-09-13: it read far higher than reality and nothing
+measures against it any more. See
 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) for why, and for the caveats that
 belong with every figure.
 
