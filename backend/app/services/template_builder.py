@@ -32,7 +32,7 @@ from app.schemas.models import (
 )
 from app.services.canonical_registry import match, norm
 from app.services.field_layout import split_runs
-from app.services.form_analyzer import geometric_fields, widget_boxes
+from app.services.form_analyzer import PRINTED_MARGIN, geometric_fields, widget_boxes
 from app.services.regeneration import label_key
 from app.services.templates import DERIVED_ROOT, preview_name, registry
 from app.services.vision_extractor import available as vision_available
@@ -196,7 +196,6 @@ def _slot_from_reading(reading, box) -> DetectedFormField:
 # the blank's, so a caption sitting just past the edge crept into the read ("Chattanooga
 # State") and was not known to be printing. Recording it costs nothing: no answer equals
 # the caption beside it.
-PRINTED_MARGIN = 0.012
 
 
 def _printed_inside(bbox, words, page_w: float, page_h: float) -> str | None:

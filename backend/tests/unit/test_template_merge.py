@@ -211,3 +211,174 @@ class TestRegionRead:
         assert "".join(w.text for w in words).replace(" ", "") == "12/26/2006"
 
 
+
+
+class TestTranscription:
+    def test_a_misread_digit_is_corrected(self):
+        from app.schemas.models import FieldType
+        from app.services.form_analyzer import _prefer_transcription
+
+        assert _prefer_transcription("42/26/2006", "12/26/2006", FieldType.DATE) == "12/26/2006"
+        assert _prefer_transcription("akag aWwa", "Nakagawa", FieldType.SHORT_TEXT) == "Nakagawa"
+
+    def test_an_unrelated_reading_is_not_adopted(self):
+        from app.schemas.models import FieldType
+        from app.services.form_analyzer import _prefer_transcription
+
+        assert _prefer_transcription("Savannah", "Willow Creek Pharmacy", FieldType.SHORT_TEXT) == "Savannah"
+
+    def test_empty_ocr_takes_only_a_credible_answer(self):
+        from app.schemas.models import FieldType
+        from app.services.form_analyzer import _prefer_transcription
+
+        assert _prefer_transcription(None, "Savannah", FieldType.SHORT_TEXT) == "Savannah"
+        assert _prefer_transcription(None, "City", FieldType.SHORT_TEXT) is None
+        assert _prefer_transcription(None, "", FieldType.SHORT_TEXT) is None
+        assert _prefer_transcription(None, "STREET,", FieldType.DATE) is None
+
+    def test_the_blanks_printing_is_taken_out_of_the_models_reading(self):
+        from app.services.form_analyzer import _strip_printed_tokens
+
+        assert _strip_printed_tokens("Name: Analise", "Name: ____") == "Analise"
+        assert _strip_printed_tokens("Analise", None) == "Analise"
+
+    def test_the_sheets_numbered_lines_are_parsed(self):
+        from app.services.vision_extractor import _parse_strips
+
+        text = "1: Nakagawa\n2: EMPTY\n**3:** 12/26/2006\n4. ingrid.nakagawa@example.com\nnoise\n"
+        assert _parse_strips(text) == {0: "Nakagawa", 1: "", 2: "12/26/2006", 3: "ingrid.nakagawa@example.com"}
+
+    def test_captions_are_cut_off_both_ends_of_the_models_reading(self):
+        from app.services.form_analyzer import _without_captions
+
+        assert _without_captions("ge: Vietnamese", "Preferred Language") == "Vietnamese"
+        assert _without_captions("ITY Manchester", "City") == "Manchester"
+        assert _without_captions("Savannah, State: 31405", "City") == "Savannah"
+        assert _without_captions("Address: 9790 Peregrine Street, City: Savannah", "Address") == "9790 Peregrine Street"
+        assert _without_captions("/_ 02/22/2026", "Date of Birth") == "02/22/2026"
+        assert _without_captions("Nakagawa", "Last Name") == "Nakagawa"
+        assert _without_captions("GA", "State") == "GA"
+
+
+class TestContainment:
+    def test_a_whole_word_part_is_the_tighter_reading(self):
+        from app.services.form_analyzer import _strictly_within
+
+        assert _strictly_within(_field("L", "TN", 0.1, 0.1), _field("L", "TN 37421", 0.1, 0.1))
+        assert _strictly_within(
+            _field("L", "2986 Lantern Hill Road", 0.1, 0.1),
+            _field("L", "2986 Lantern Hill Road Apt/Trailer", 0.1, 0.1),
+        )
+
+    def test_a_piece_of_a_word_is_a_misread(self):
+        from app.services.form_analyzer import _strictly_within
+
+        assert not _strictly_within(_field("L", "rid", 0.1, 0.1), _field("L", "Ingrid", 0.1, 0.1))
+        assert not _strictly_within(_field("L", "akag aWwa", 0.1, 0.1), _field("L", "Nakagawa", 0.1, 0.1))
+        assert not _strictly_within(_field("L", "Ingrid", 0.1, 0.1), _field("L", "Ingrid", 0.1, 0.1))
+
+    def test_spacing_inside_a_word_does_not_matter(self):
+        from app.services.form_analyzer import _strictly_within
+
+        assert _strictly_within(
+            _field("L", "GRP 75930", 0.1, 0.1), _field("L", "AAAS EALAW Swe GRP75930", 0.1, 0.1)
+        )
+        assert not _strictly_within(_field("L", "GRP 75930", 0.1, 0.1), _field("L", "GRP75930", 0.1, 0.1))
+
+
+class TestPrintedRing:
+    def test_the_caption_beside_a_slot_takes_its_own_token(self):
+        from app.schemas.models import BoundingBox
+        from app.services.form_analyzer import _printed_left
+        from app.services.word_source import Word
+
+        box = BoundingBox(x=0.30, y=0.50, width=0.20, height=0.02)
+        # Page 1000x1000: the caption "Pharmacy:" ends just left of the slot, the value inside it.
+        caption = Word(280, 505, 298, 515, "Pharmacy:", 0, 0.9)
+        value = [Word(305, 505, 380, 515, "Lakeshore", 0, 0.9),
+                 Word(390, 505, 450, 515, "Pharmacy", 0, 0.9)]
+        assert _printed_left("Pharmacy:", [caption, *value], box, 1000, 1000) is None
+        assert _printed_left("Pharmacy:", value, box, 1000, 1000) == "pharmacy"
+        assert _printed_left(None, value, box, 1000, 1000) is None
+
+    def test_the_blanks_printed_words_cut_a_photographs_fragments(self):
+        from app.services.form_analyzer import _without_captions
+
+        assert _without_captions("ity Spokane", "City", "City: State: Zip Code:") == "Spokane"
+        assert _without_captions("S caspian.beauchamp@example.com", "Email Address", None) == "caspian.beauchamp@example.com"
+        assert _without_captions("Adeyemi SS", "Last Name", "Last Name: SSN:") == "Adeyemi"
+        assert _without_captions("Person Zephyr Beauchamp", "Emergency Contact", "Contact Person:") == "Zephyr Beauchamp"
+        assert _without_captions("Name Analise", "First Name", "First Name:") == "Analise"
+        assert _without_captions("T Ravensworth", "Last Name", "PATIENT LAST NAME") == "Ravensworth"
+        assert _without_captions("Willow Creek Pharmacy", "Pharmacy", "Pharmacy:") == "Willow Creek Pharmacy"
+        assert _without_captions("Male", "Sex", "Male Female") == "Male"
+
+
+class TestFormDate:
+    def test_a_bare_date_is_the_forms_date_not_the_birth_date(self):
+        from app.services.canonical_registry import match
+
+        assert match("Date")[0].canonical_key == "form.date"
+        assert match("Today's Date")[0].canonical_key == "form.date"
+        assert match("Signature Date")[0].canonical_key == "form.date"
+        assert match("Date of Birth")[0].canonical_key == "patient.date_of_birth"
+        assert match("Birth Date")[0].canonical_key == "patient.date_of_birth"
+        assert match("DOB")[0].canonical_key == "patient.date_of_birth"
+
+
+class TestValueRunEnd:
+    def _line(self, spec):
+        from app.services.word_source import Word
+
+        # spec: (text, x0, x1); one line of 10pt words on a common baseline.
+        return [Word(x0, 100, x1, 110, text, 0, 0.95) for text, x0, x1 in spec]
+
+    def test_a_one_word_caption_inside_a_name_does_not_cut_it(self):
+        from app.services.form_analyzer import _value_run_end
+
+        line = self._line([("Preferred", 0, 40), ("Pharmacy:", 42, 85), ("Lakeshore", 92, 130), ("Pharmacy", 132, 170)])
+        assert _value_run_end(line, 2, len(line)) == 4
+        line = self._line([("Pharmacy:", 0, 43), ("Third", 50, 73), ("Street", 76, 103), ("Drug", 106, 128)])
+        assert _value_run_end(line, 1, len(line)) == 4
+
+    def test_a_case_change_or_a_gap_still_marks_the_next_caption(self):
+        from app.services.form_analyzer import _value_run_end
+
+        line = self._line([("EMERGENCY", 0, 60), ("CONTACT", 62, 100), ("Ngozi", 106, 130), ("Okafor", 133, 165), ("RELATIONSHIP", 168, 240)])
+        assert _value_run_end(line, 2, len(line)) == 4
+        line = self._line([("City:", 0, 25), ("Chattanooga", 30, 90), ("State", 110, 135), ("TN", 140, 152)])
+        assert _value_run_end(line, 1, len(line)) == 2
+
+    def test_a_caption_of_two_words_cuts_as_before(self):
+        from app.services.form_analyzer import _value_run_end
+
+        line = self._line([("Race", 0, 22), ("Black/African", 25, 90), ("American", 93, 135), ("Preferred", 138, 180), ("Language", 183, 225), ("English", 228, 262)])
+        assert _value_run_end(line, 1, len(line)) == 3
+
+
+class TestTranscriptionParts:
+    def test_the_models_reading_corrects_a_caption_fragment_in_front_of_the_value(self):
+        from app.schemas.models import FieldType
+        from app.services.form_analyzer import _prefer_transcription
+
+        assert _prefer_transcription("ress, Fresno", "Fresno", FieldType.SHORT_TEXT) == "Fresno"
+        assert _prefer_transcription("Person Zephyr Beauchamp", "Zephyr Beauchamp", FieldType.SHORT_TEXT) == "Zephyr Beauchamp"
+        assert _prefer_transcription("akag aWwa", "Nakagawa", FieldType.SHORT_TEXT) == "Nakagawa"
+
+    def test_a_title_with_a_full_stop_is_not_a_caption_fragment(self):
+        from app.services.form_analyzer import _without_captions
+
+        assert _without_captions("Dr. Marisol Vandermeer", "Primary Care Physician", None) == "Dr. Marisol Vandermeer"
+        assert _without_captions("il; oluwafemi@example.com", "Email", None) == "oluwafemi@example.com"
+
+    def test_glued_caption_letters_are_split_off(self):
+        from app.services.form_analyzer import _without_captions
+
+        assert _without_captions("yPortland", "City", None) == "Portland"
+        assert _without_captions("eCT", "State", None) == "CT"
+        assert _without_captions("p04101", "Zip", None) == "04101"
+        assert _without_captions("e03/02/2026", "Date", None) == "03/02/2026"
+        assert _without_captions("eNative Hawaiian", "Race", None) == "Native Hawaiian"
+        assert _without_captions("e) Male", "Gender", None) == "Male"
+        assert _without_captions("u:Son", "Relation to you", None) == "Son"
+        assert _without_captions("eBay", "Employer", None) == "eBay"

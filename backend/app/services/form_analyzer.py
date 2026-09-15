@@ -13,7 +13,7 @@ import fitz
 
 from app.config import settings
 from app.schemas.form_understanding import DetectedFormField, FormAnalysis, RequiredStatus
-from app.schemas.models import BoundingBox, FieldType
+from app.schemas.models import BoundingBox, FieldType, TemplateField
 from app.services.canonical_registry import PHRASING, known_captions, match, norm
 from app.services.field_layout import (
     MARKED_INK_RATIO,
@@ -35,7 +35,9 @@ from app.services.relinker import relink
 from app.services.templates import MATCH_THRESHOLD, registry
 from app.services.vision_extractor import available as vision_available
 from app.services.vision_extractor import extract as vision_extract
+from app.services.vision_extractor import slot_vision_available, transcribe_strips
 from app.services.word_source import (
+    LABEL_GAP_RATIO,
     MAX_LABEL_WORDS,
     MIN_LEGIBLE,
     PdfMark,
@@ -502,7 +504,21 @@ def _value_run_end(line: list[Word], first: int, stop: int, em: float | None = N
         # decides it is ``_known_label_ends``, which demands an exact vocabulary alias at
         # the start of the run, so an ordinary title-case value -- a surname, a street --
         # cuts nothing.
-        if (_is_shouted(line[j].text) or line[j].text[:1].isupper()) and _known_label_ends(line[j:]):
+        if not (_is_shouted(line[j].text) or line[j].text[:1].isupper()):
+            continue
+        ends = _known_label_ends(line[j:])
+        if not ends:
+            continue
+        # A caption of one word is also an ordinary word: "Pharmacy" ends the name of a
+        # pharmacy, "Street" an address, "Group" an employer, and each cut a value short
+        # -- 46 fields on the second fill set. One word names the next field only when
+        # something marks it off from the answer it follows: a change of case
+        # ("Ngozi Okafor RELATIONSHIP") or a gap wider than the answer's own word spaces.
+        # A caption of two words or more is never part of a name and cuts as before.
+        one_word = ends[0] == 0
+        case_change = _is_shouted(line[j].text) and not _is_shouted(line[j - 1].text)
+        gap = line[j].x0 - line[j - 1].x1
+        if not one_word or case_change or gap > em * LABEL_GAP_RATIO:
             return j
     return stop
 
@@ -1952,9 +1968,25 @@ def _answered(field: DetectedFormField) -> bool:
 
 
 def _strictly_within(inner: DetectedFormField, outer: DetectedFormField) -> bool:
-    """Whether one reading is a proper part of the other, ignoring case and separators."""
-    a, b = comparable(inner.normalized_value), comparable(outer.normalized_value)
-    return bool(a) and a != b and a in b
+    """Whether one reading is a proper part of the other, whole words only.
+
+    "TN" is a tighter reading of "TN 37421" and "2986 Lantern Hill Road" of "... Road
+    Apt/Trailer": the outer region reached into the next field. "rid" is not a tighter
+    reading of "Ingrid", and "akag" is not one of "Nakagawa": a piece of a word is a
+    misread, and the reading that has the whole word is the better one.
+    """
+    whole = comparable(inner.normalized_value)
+    tokens = [comparable(t) for t in str(outer.normalized_value).split()]
+    tokens = [t for t in tokens if t]
+    if not whole or whole == "".join(tokens):
+        return False
+    # The inner reading must be a run of the outer's whole words; the words themselves
+    # may be spaced differently ("GRP 75930" is a run of "... GRP75930").
+    return any(
+        "".join(tokens[i:j]) == whole
+        for i in range(len(tokens))
+        for j in range(i + 1, len(tokens) + 1)
+    )
 
 
 def _same_run(a: BoundingBox, b: BoundingBox) -> bool:
@@ -2006,6 +2038,15 @@ def _read_with_template(
     except KeyError:
         return []
     slots = next((p.fields for p in definition.pages if p.page_index == page_index), [])
+    # A photograph's slots are also read by the vision model, all of them on one sheet:
+    # it corrects what OCR misread ("42/26/2006") or fills what OCR could not read at
+    # all, may not replace a reading with something unrelated, and never gets the last
+    # word over the furniture rules. Off unless SLOT_VISION is set.
+    seen = (
+        _transcriptions(image, slots, words, w, h)
+        if source == "ocr" and image is not None and slots and slot_vision_available()
+        else None
+    )
     fields = []
     for index, slot in enumerate(slots):
         box = slot.bbox
@@ -2017,7 +2058,8 @@ def _read_with_template(
             and word.text.strip()
         ]
         # The blank said what this region prints; what the filled copy adds is the answer.
-        inside = _without_printed(inside, slot.printed_text)
+        printed = _printed_left(slot.printed_text, words, box, w, h)
+        inside = _without_printed(inside, printed)
         if source == "ocr" and image is not None:
             # A photograph's slot is read again on its own, enlarged: the page-level OCR
             # of a 150dpi render turned "12/26/2006" into "42/26/2006", and the enlarged
@@ -2028,7 +2070,7 @@ def _read_with_template(
                 (box.x * w, box.y * h, (box.x + box.width) * w, (box.y + box.height) * h),
                 settings.ocr_language,
             )
-            region = _without_printed(region, slot.printed_text)
+            region = _without_printed(region, printed)
             # The crop replaces the page's reading only when it is clearly surer: on a tie
             # the two readings are as good as each other and the page's is the one every
             # other rule was measured against.
@@ -2041,10 +2083,20 @@ def _read_with_template(
                 " ".join(z.text for z in row) for row in group_lines_tolerant(inside)
             ).strip()
         ) or None
+        if answer:
+            answer = _without_captions(answer, slot.label, slot.printed_text) or None
         if is_blank_marker(answer) or _is_printed_caption(answer):
             answer = None
         mapped, score, reason = match(slot.label)
         typ = slot.field_type or FieldType.SHORT_TEXT
+        if seen is not None and seen[index]:
+            answer = _prefer_transcription(
+                answer,
+                _strip_printed_tokens(
+                    _without_captions(seen[index], slot.label, slot.printed_text), printed
+                ),
+                typ,
+            )
         normalized = normalize(answer, typ) if answer else None
         fields.append(
             DetectedFormField(
@@ -2070,6 +2122,188 @@ def _read_with_template(
             )
         )
     return fields
+
+
+# How far beyond a slot the strip shown to the vision model reaches, in slot heights.
+# Sideways nothing: a taught slot already starts a little before its value and ends at
+# the next word, and every pixel past that is the caption beside it.
+TRANSCRIBE_MARGIN_VERTICAL = 0.15
+# The least the model's reading and OCR's must agree, character for character, for the
+# model's to replace OCR's: enough to accept "12/26/2006" for "42/26/2006" and "Nakagawa"
+# for "akag aWwa", not enough to accept an unrelated line.
+TRANSCRIBE_AGREEMENT = 0.5
+
+
+def _transcriptions(
+    image: Path, slots: list[TemplateField], words: list[Word], w: float, h: float
+) -> list[str]:
+    """The vision model's reading of every taught slot, aligned to ``slots``; "" elsewhere.
+
+    Only slots a reviewer placed are read: those are the ones known to hold an answer,
+    where a slot the blank's own geometry suggested is mostly a box, a rule or a heading.
+    """
+    chosen = [index for index, slot in enumerate(slots) if slot.taught]
+    if not chosen:
+        return [""] * len(slots)
+    regions = []
+    for index in chosen:
+        box = slots[index].bbox
+        y0, y1 = box.y * h, (box.y + box.height) * h
+        margin = TRANSCRIBE_MARGIN_VERTICAL * max(1.0, y1 - y0)
+        regions.append((box.x * w, y0 - margin, (box.x + box.width) * w, y1 + margin))
+    heights = sorted(word.y1 - word.y0 for word in words if word.text.strip())
+    line = heights[len(heights) // 2] if heights else 20.0
+    out = [""] * len(slots)
+    try:
+        for index, text in zip(chosen, transcribe_strips(image, regions, line), strict=True):
+            out[index] = text
+    except Exception:  # noqa: BLE001 - the model is a second opinion, never a dependency
+        return [""] * len(slots)
+    return out
+
+
+def _without_captions(text: str, label: str, printed: str | None = None) -> str:
+    """A reading with the form's captions cut off both ends.
+
+    A taught slot begins a little before its value, so the tail of the caption beside it
+    is in the slot -- whole in a text layer, cut at the crop's edge on a photograph ("ity
+    Spokane" under "City", "S caspian@example.com" under "Email Address") -- and a
+    reading that runs on carries the next caption ("Savannah, State: 31405", "Adeyemi
+    SS"). Leading tokens are dropped while they end the slot's caption or a word the
+    blank prints there; the reading stops at a later token that ends in a colon or
+    begins a printed word.
+    """
+    tokens = text.split()
+    while tokens and not any(ch.isalnum() for ch in tokens[0]):
+        tokens.pop(0)
+    captions = {norm(label).replace(" ", "")} | set(norm(printed).split() if printed else [])
+    captions.discard("")
+
+    def ends_a_caption(fragment: str) -> bool:
+        return bool(fragment) and any(c.endswith(fragment) and c != fragment for c in captions) or (
+            fragment in captions
+        )
+
+    # The fragment is glued to the value by the rule the model saw under both
+    # ("S_fenna@example.com", "H_01/26/1958"), or by nothing at all where the caption's
+    # last letter touches the value's first ("yPortland", "eCT", "p04101"): split it off
+    # where the case or the kind of character turns, when it ends a caption.
+    glued = (
+        re.match(r"^([^_:]{1,3})[_:]+(.+)$", tokens[0])
+        or re.match(r"^([a-z]{1,2})([A-Z0-9].*)$", tokens[0])
+    ) if tokens else None
+    if glued and ends_a_caption(norm(glued.group(1)).replace(" ", "")):
+        tokens[0] = glued.group(2)
+    # A letter or two with a bracket, colon or comma after it, in front of the answer, is
+    # the end of a caption the crop cut through ("e) Male", "il; oluwafemi@example.com").
+    # Not a full stop: "Dr. Marisol Vandermeer" begins with one, and twelve physicians
+    # lost their title to a rule that counted it.
+    if len(tokens) > 1 and re.fullmatch(r"[A-Za-z]{1,2}[):;,]", tokens[0]):
+        tokens.pop(0)
+    stripped = True
+    while stripped and len(tokens) > 1:
+        stripped = False
+        for count in (3, 2, 1):
+            if len(tokens) > count:
+                lead = norm(" ".join(tokens[:count]).rstrip(":")).replace(" ", "")
+                if ends_a_caption(lead):
+                    tokens = tokens[count:]
+                    stripped = True
+                    break
+    for position in range(1, len(tokens)):
+        token = tokens[position]
+        key = norm(token).replace(" ", "")
+        if token.endswith(":") or (
+            len(key) >= 2
+            and key not in captions
+            and any(c.startswith(key) and len(c) > len(key) for c in captions)
+        ):
+            tokens = tokens[:position]
+            break
+    return " ".join(tokens).strip(" ,;:-\u2013_")
+
+
+def _strip_printed_tokens(text: str, printed: str | None) -> str:
+    """Drop the tokens the blank prints inside the region, once each, keeping the rest."""
+    remaining: Counter[str] = Counter(norm(printed).split()) if printed else Counter()
+    kept = []
+    for token in text.split():
+        key = norm(token)
+        if key and remaining[key] > 0:
+            remaining[key] -= 1
+            continue
+        kept.append(token)
+    return " ".join(kept).strip(" :-–")
+
+
+def _prefer_transcription(answer: str | None, seen: str, typ: FieldType) -> str | None:
+    """OCR's reading, corrected by the model's where the two plainly saw the same thing.
+
+    Empty OCR takes the model's reading only if it is a credible answer of the slot's
+    type and not the form's own printing; a non-empty OCR reading is replaced only when
+    the two agree on at least half their characters, so a misread digit is corrected and
+    an unrelated line is not adopted.
+    """
+    seen = seen.strip()
+    if not seen:
+        return answer
+    if not answer:
+        if plausible(seen, typ) < SUSPECT or _is_a_caption(seen) or _is_printed_caption(seen):
+            return None
+        return seen
+    a, b = comparable(answer), comparable(seen)
+    if a == b:
+        return answer
+    # Measured and rejected (2026-09-15): keeping OCR's reading whenever the model's is
+    # a part of it. It saved "Anselm Ashworth" from "Anselm" twice and cost 37 fields,
+    # because OCR's reading is usually the longer one for the wrong reason -- a caption
+    # fragment in front of the value ("ress, Fresno", "Person Zephyr Beauchamp") that
+    # the model's reading is the correction of.
+    from difflib import SequenceMatcher
+
+    return seen if SequenceMatcher(None, a, b).ratio() >= TRANSCRIBE_AGREEMENT else answer
+
+
+# How far beyond a slot the blank's printing is recorded from, as a fraction of page
+# width sideways and half that up and down: a caption ending a hair outside the region
+# is furniture the region's reading will catch. Shared with the template builder so the
+# printing is subtracted on the footprint it was recorded on.
+PRINTED_MARGIN = 0.012
+
+
+def _printed_left(
+    printed: str | None, words: list[Word], box: BoundingBox, w: float, h: float
+) -> str | None:
+    """The slot's recorded printing less what the page prints just outside the slot.
+
+    The printing was recorded a hair beyond the region, so the caption beside a slot is
+    in it: "Pharmacy:" for the pharmacy's name. Subtracted from the region's words alone,
+    that token has nothing to consume but the answer's own word, and "Lakeshore Pharmacy"
+    reads "Lakeshore" -- 46 fields on the second fill set. The words in the margin ring
+    take their tokens first; only what they leave is subtracted from the answer.
+    """
+    if not printed:
+        return None
+    m = PRINTED_MARGIN
+    remaining: Counter[str] = Counter(norm(printed).split())
+    for word in words:
+        if not word.text.strip():
+            continue
+        cx, cy = ((word.x0 + word.x1) / 2) / w, ((word.y0 + word.y1) / 2) / h
+        within = box.x <= cx <= box.x + box.width and box.y <= cy <= box.y + box.height
+        near = (
+            box.x - m <= cx <= box.x + box.width + m
+            and box.y - m / 2 <= cy <= box.y + box.height + m / 2
+        )
+        if within or not near:
+            continue
+        pieces = [piece for piece in word.text.split("_") if piece] if "_" in word.text else [word.text]
+        for piece in pieces:
+            token = norm(piece)
+            if token and remaining[token] > 0:
+                remaining[token] -= 1
+    left = " ".join(remaining.elements())
+    return left or None
 
 
 def _without_printed(words: list[Word], printed: str | None) -> list[Word]:
