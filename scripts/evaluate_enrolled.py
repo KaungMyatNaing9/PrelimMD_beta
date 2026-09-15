@@ -68,6 +68,7 @@ def main() -> int:
     parser.add_argument("--api", default="http://127.0.0.1:8000")
     parser.add_argument("--set", dest="which", default="TEST4")
     parser.add_argument("--dump", default=None, help="passed through to evaluate_real_forms.py")
+    parser.add_argument("--parallel", type=int, default=1, help="scoring workers")
     args = parser.parse_args()
 
     folder = FORMS / args.which
@@ -86,7 +87,8 @@ def main() -> int:
         subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "evaluate_real_forms.py"),
              "--api", args.api, "--truth", f"{args.which}/ground_truth_new.json",
-             *(["--dump", args.dump] if args.dump else [])],
+             *(["--dump", args.dump] if args.dump else []),
+             *(["--parallel", str(args.parallel)] if args.parallel > 1 else [])],
             check=False,
         )
     finally:

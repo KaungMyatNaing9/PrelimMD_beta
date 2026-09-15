@@ -128,16 +128,46 @@ def main() -> int:
     parser.add_argument("--score", default="LARGE_B")
     parser.add_argument("--positions", choices=["none", "detected", "oracle"], default="oracle")
     parser.add_argument("--dump", default=None)
+    parser.add_argument("--parallel", type=int, default=1, help="scoring workers")
+    parser.add_argument(
+        "--templates-dir", default=None,
+        help="the folder the backend was started with as DERIVED_TEMPLATES_DIR; with "
+        "--snapshot, the taught templates are copied there after enrolment, and reused "
+        "from there next time instead of enrolling again",
+    )
+    parser.add_argument(
+        "--snapshot", default=None,
+        help="folder to keep (or reuse) the taught templates in; enrolment and teaching "
+        "produce the same templates whenever only the reading side changed, and cost "
+        "half an hour a run",
+    )
     args = parser.parse_args()
 
     learn = FORMS / args.learn[0]
     truths = {name: json.loads((FORMS / name / "ground_truth_new.json").read_text())
               for name in args.learn}
     before = templates(args.api)
-    blanks = [p for p in sorted(learn.glob("*.pdf")) if not p.stem.endswith("_FILLED")]
-    print(f"enrolling {len(blanks)} blanks from {args.learn[0]}, teaching from "
-          f"{', '.join(args.learn)} with --positions {args.positions}, scoring {args.score}")
-    created, taught = [], 0
+    snapshot = Path(args.snapshot) if args.snapshot else None
+    if snapshot and args.templates_dir and snapshot.is_dir() and any(snapshot.iterdir()):
+        # A backend started on an empty folder loads its registry at first use, so the
+        # copied templates are live for the scoring below without a restart.
+        if before:
+            print("!! the backend already holds templates; reuse needs an empty registry")
+            return 1
+        import shutil
+
+        for folder in snapshot.iterdir():
+            shutil.copytree(folder, Path(args.templates_dir) / folder.name, dirs_exist_ok=True)
+        created = sorted(p.name for p in snapshot.iterdir())
+        print(f"reusing {len(created)} taught templates from {snapshot}; scoring {args.score}\n")
+        blanks = []
+    else:
+        blanks = [p for p in sorted(learn.glob("*.pdf")) if not p.stem.endswith("_FILLED")]
+    if blanks:
+        print(f"enrolling {len(blanks)} blanks from {args.learn[0]}, teaching from "
+              f"{', '.join(args.learn)} with --positions {args.positions}, scoring {args.score}")
+        created = []
+    taught = 0
     for blank in blanks:
         template_id, note = enrol(args.api, blank)
         if not template_id:
@@ -161,12 +191,20 @@ def main() -> int:
             note += f"; taught {len(corrections)} of {len(expected)} -> {made.get('field_count', '?')} slots"
         print(f"  {blank.name:28} {template_id:6} {note}")
 
-    print(f"\n{len(created)} templates enrolled, {taught} corrections taught; scoring {args.score}\n")
+    if blanks:
+        print(f"\n{len(created)} templates enrolled, {taught} corrections taught; scoring {args.score}\n")
+        if snapshot and args.templates_dir:
+            import shutil
+
+            shutil.rmtree(snapshot, ignore_errors=True)
+            shutil.copytree(args.templates_dir, snapshot)
+            print(f"taught templates kept in {snapshot}")
     try:
         subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "evaluate_real_forms.py"),
              "--api", args.api, "--truth", f"{args.score}/ground_truth_new.json",
-             *(["--dump", args.dump] if args.dump else [])],
+             *(["--dump", args.dump] if args.dump else []),
+             *(["--parallel", str(args.parallel)] if args.parallel > 1 else [])],
             check=False,
         )
     finally:

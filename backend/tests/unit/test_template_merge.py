@@ -209,3 +209,5 @@ class TestRegionRead:
         except Exception as exc:  # noqa: BLE001 - no Tesseract binary on this machine
             pytest.skip(str(exc))
         assert "".join(w.text for w in words).replace(" ", "") == "12/26/2006"
+
+

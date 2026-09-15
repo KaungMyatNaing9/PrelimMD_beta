@@ -24,6 +24,16 @@ TEMPLATE_ROOTS = (TEMPLATE_ROOT, DERIVED_ROOT)
 MIN_GEOMETRIC_MATCHES = 8
 # How many of the best-matching candidate pages get the geometric fit.
 GEOMETRIC_FIT_POOL = 25
+# Every page is matched at this width, whatever it was rendered or photographed at.
+MATCH_WIDTH = 1200
+MATCH_FEATURES = 2000
+
+
+def _normalised(gray: np.ndarray) -> np.ndarray:
+    h, w = gray.shape[:2]
+    if w == MATCH_WIDTH:
+        return gray
+    return cv2.resize(gray, (MATCH_WIDTH, max(1, round(h * MATCH_WIDTH / w))))
 GEOMETRIC_MATCH_POOL = 300
 # Measured separation is wide: an unrelated form scores ~0.04, the right template ~1.0.
 MATCH_THRESHOLD = 0.5
@@ -149,9 +159,14 @@ class TemplateRegistry:
         else:
             candidates = self.all()
 
-        # ORB feature matching against safe synthetic blank masters. A completed form retains its frame/labels.
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        orb = cv2.ORB_create(1200)
+        # ORB feature matching against the stored blank masters; a completed form retains
+        # its frame and captions. Both sides are brought to one width first: a master is
+        # rendered at 1224 px across and a photograph arrives at 1275, and that four
+        # percent was enough to halve the geometric agreement -- 30 of 111 benchmark
+        # photographs scored 0.05-0.5 against their own template and were read zero-shot.
+        # Normalised, with 2,000 features, all thirty score 0.72-1.0.
+        gray = _normalised(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY))
+        orb = cv2.ORB_create(MATCH_FEATURES)
         keys, desc = orb.detectAndCompute(gray, None)
         if desc is None:
             return None, 0, 0.0
@@ -188,7 +203,9 @@ class TemplateRegistry:
             master = cv2.imread(str(canonical_image_path(template_id, page_index)))
             if master is None:
                 return None
-            mk, md = orb.detectAndCompute(cv2.cvtColor(master, cv2.COLOR_BGR2GRAY), None)
+            mk, md = orb.detectAndCompute(
+                _normalised(cv2.cvtColor(master, cv2.COLOR_BGR2GRAY)), None
+            )
             if md is None:
                 return None
             self._features[key] = (mk, md)
