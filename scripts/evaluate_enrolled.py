@@ -49,9 +49,15 @@ def enrol(api: str, blank: Path) -> tuple[str | None, str]:
         return None, "analysis failed"
     made = api_json(["curl", "-s", "--max-time", "600", "-X", "POST",
                      f"{api}/api/v1/form-analyses/{run_id}/derive-template"])
+    if not made:
+        # A crash answers with a plain-text 500, not JSON. Reporting that as "not
+        # derivable" hid a hard cap of fifty derived ids for a whole day.
+        return None, "server error (see the backend log)"
     if made.get("template_id"):
-        pages = made.get("pages") or [{}]
-        return made["template_id"], f"{len(pages[0].get('fields') or [])} slots"
+        # The route returns a summary (template_id, field_count, field ids), not the
+        # template's pages. Reading pages[0].fields here printed "0 slots" for every
+        # enrolment, which read as "the template is empty" when it was not.
+        return made["template_id"], f"{made.get('field_count', '?')} slots"
     detail = made.get("detail")
     message = detail.get("message") if isinstance(detail, dict) else detail
     return None, str(message or "not derivable")[:70]
@@ -61,6 +67,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", default="http://127.0.0.1:8000")
     parser.add_argument("--set", dest="which", default="TEST4")
+    parser.add_argument("--dump", default=None, help="passed through to evaluate_real_forms.py")
     args = parser.parse_args()
 
     folder = FORMS / args.which
@@ -78,7 +85,8 @@ def main() -> int:
     try:
         subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "evaluate_real_forms.py"),
-             "--api", args.api, "--truth", f"{args.which}/ground_truth_new.json"],
+             "--api", args.api, "--truth", f"{args.which}/ground_truth_new.json",
+             *(["--dump", args.dump] if args.dump else [])],
             check=False,
         )
     finally:

@@ -9,6 +9,11 @@ A field counts as correct only when the value is bound to the right label, so a 
 perfectly but attached to the neighbouring caption still fails. That is the failure mode
 real multi-column forms actually produce.
 
+Precision is printed beside recall, from the same responses: a proposed value is vouched
+for when it is one of the answers actually written on the page, and everything else is
+printed furniture the reader mistook for an answer. Recall alone cannot see those, and it
+is trivially high for a reader that emits everything, so neither figure is quoted alone.
+
     python scripts/evaluate_real_forms.py [--api http://127.0.0.1:8000] [--verbose]
 """
 
@@ -90,6 +95,12 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--truth", default="ground_truth.json")
     parser.add_argument(
+        "--dump",
+        default=None,
+        help="directory to keep every analysis response in, one JSON per artefact, so a "
+        "run can be compared page by page with another without re-analysing",
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=0,
@@ -130,7 +141,7 @@ def main() -> int:
     # in that subfolder. Resolving against data/real-forms/ instead reported every form in
     # NEW/ and TEST2/ as missing and then divided by zero.
     defects = truth.get("_placement_defects", {}) if args.skip_defects else {}
-    total = correct = omitted = 0
+    total = correct = omitted = proposed = vouched = 0
     for name, expected in truth.items():
         if name.startswith("_"):
             continue
@@ -143,6 +154,9 @@ def main() -> int:
             print(f"!! missing {name}")
             continue
         analysis = analyse(args.api, image)
+        if args.dump:
+            Path(args.dump).mkdir(parents=True, exist_ok=True)
+            (Path(args.dump) / f"{name}.json").write_text(json.dumps(analysis))
         found = {}
         for field in analysis["detected_fields"]:
             if field["normalized_value"] in (None, "", False):
@@ -156,6 +170,17 @@ def main() -> int:
                 # and the later copies are the blank insurance ones.
                 if key and key not in found:
                     found[key] = field["normalized_value"]
+        # The same rule as `intake_field_coverage.py`, so the two figures stay comparable:
+        # a value is vouched for when it and a written answer contain one another.
+        valued = [
+            str(f.get("normalized_value")).strip().lower()
+            for f in analysis["detected_fields"]
+            if str(f.get("normalized_value") or "").strip()
+        ]
+        wanted = {str(v).strip().lower() for v in expected.values() if str(v).strip()}
+        good = sum(1 for v in valued if any(v in w or w in v for w in wanted))
+        proposed += len(valued)
+        vouched += good
 
         hits = []
         for label, want in expected.items():
@@ -169,7 +194,8 @@ def main() -> int:
             hits.append((ok, label, want, have))
 
         got = sum(1 for h in hits if h[0])
-        print(f"\n{name}  {got}/{len(hits)} = {got / len(hits) * 100:.0f}%")
+        print(f"\n{name}  {got}/{len(hits)} = {got / len(hits) * 100:.0f}%"
+              f"   precision {good}/{len(valued)}")
         for ok, label, want, have in hits:
             if not ok or args.verbose:
                 mark = "ok  " if ok else "FAIL"
@@ -182,6 +208,8 @@ def main() -> int:
     if omitted:
         print(f"\n  omitted {omitted} entries whose value was never written on a field")
     print(f"\nREAL-FORM ACCURACY {correct}/{total} = {correct / total * 100:.1f}%")
+    if proposed:
+        print(f"REAL-FORM PRECISION {vouched}/{proposed} = {vouched / proposed * 100:.1f}%")
     print("Gate 2 criterion: >= 95% on printed text")
     return 0
 

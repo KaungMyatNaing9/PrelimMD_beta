@@ -116,7 +116,7 @@ def regenerate(
     they are translated through CORPUS_KEY_ALIASES on the way in. Values with no slot are
     not rendered; ``unplaced`` names them so a caller can say so.
     """
-    blank = canonical_image_path(template.template_id)
+    blank = canonical_image_path(template.template_id, page_index)
     if not blank.exists():
         raise FileNotFoundError(f"No blank master for template {template.template_id}")
 
@@ -175,7 +175,11 @@ def label_key(label: str) -> str:
     identically or an unknown form would regenerate almost entirely blank.
     """
     base = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "field"
-    return base if base[0].isalpha() else f"f_{base}"
+    key = base if base[0].isalpha() else f"f_{base}"
+    # TemplateField ids need at least two characters. A one-letter caption ("F" beside a
+    # sex tick box, a bare "#") otherwise fails validation and blocks deriving the whole
+    # template -- seen on a real registration form during enrolment on 2026-09-13.
+    return key if len(key) > 1 else f"field_{key}"
 
 
 def values_from_analysis(analysis, template=None, page_index: int = 0) -> dict[str, Any]:

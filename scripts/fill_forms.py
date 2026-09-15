@@ -13,17 +13,24 @@ It also refuses to guess. A value is written only when:
   * there is clear space after it -- the run is measured, and if it would collide with
     the next printed thing on that line, the field is skipped and reported, not squeezed.
 
-Anything skipped is listed at the end, so a thin fill is visible rather than silent. The
-patient is invented; no real person's details appear here, and none should.
+Anything skipped is listed at the end, so a thin fill is visible rather than silent.
 
-    python scripts/fill_forms.py --dir data/real-forms/NEW
-    python scripts/fill_forms.py --dir data/real-forms/NEW --check   # report, write nothing
+Every patient is invented, and **a different one goes on every form** -- drawn from
+pools, seeded from the form's filename so the draw is reproducible. A single repeated
+identity would be a benchmark a reader could pass by memorising one name; varying it
+means the only way to score is to read the page. No real person's details appear here,
+and none should.
+
+    python scripts/fill_forms.py --dir data/real-forms/LARGE
+    python scripts/fill_forms.py --dir data/real-forms/LARGE --check   # report, write nothing
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import random
 import re
 import sys
 from pathlib import Path
@@ -39,41 +46,198 @@ GAP_PT = 5.0
 # Renders scored by the image path. 150dpi matches the rest of the corpus.
 DPI = 150
 
-# One invented patient. Every value is fictional.
-PATIENT = {
-    "full_name": "Amara C Okafor",
-    "first_name": "Amara",
-    "last_name": "Okafor",
-    "middle_name": "Chidinma",
-    "preferred_name": "Amy",
-    "dob": "04/17/1986",
-    "ssn": "412-55-0184",
-    "sex": "Female",
-    "marital_status": "Married",
-    "address": "1420 Bellefield Avenue",
-    "city": "Pittsburgh",
-    "state": "PA",
-    "zip": "15206",
-    "home_phone": "412-555-0184",
-    "cell_phone": "412-555-0199",
-    "work_phone": "412-555-0286",
-    "phone": "412-555-0184",
-    "email": "amara.okafor@example.com",
-    "employer": "Riverside Logistics",
-    "occupation": "Operations Manager",
-    "emergency_contact": "Ngozi Okafor",
-    "emergency_phone": "412-555-0311",
-    "relationship": "Sister",
-    "language": "English",
-    "race": "Black/African American",
-    "ethnicity": "Non-Hispanic",
-    "insurance_name": "Keystone Health",
-    "insurance_id": "KH884120773",
-    "group_id": "GRP40218",
-    "pharmacy": "Bellefield Pharmacy",
-    "physician": "Dr Helen Osei-Bonsu",
-    "date": "08/25/2026",
-}
+# A different invented patient on every form.
+#
+# One patient repeated across every artefact is a benchmark that can be passed without
+# reading anything: "Okafor" appearing on 150 pages is a string a reader could learn, and
+# a tuned threshold that happens to suit one name, one address length and one area code
+# would look like accuracy. Drawing a fresh identity per form removes that -- the only way
+# to score is to actually read what is on the page.
+#
+# The draw is seeded from the form's filename, so it is *stable*: re-running the filler
+# reproduces the same corpus, and the ground truth stays valid without regenerating it.
+#
+# Everything here is fictional by construction, not by hope: phone numbers stay inside the
+# 555-01xx range reserved for fiction, Social Security numbers use a 9xx area that has
+# never been issued, and mail goes to the reserved example.com family.
+
+FIRST = [
+    ("Amara", "F"), ("Damaris", "F"), ("Ingrid", "F"), ("Priya", "F"), ("Rosalind", "F"),
+    ("Thandiwe", "F"), ("Yelena", "F"), ("Constance", "F"), ("Mireille", "F"), ("Saoirse", "F"),
+    ("Beatriz", "F"), ("Noor", "F"), ("Winifred", "F"), ("Analise", "F"), ("Keiko", "F"),
+    ("Ottilie", "F"), ("Marisol", "F"), ("Fenna", "F"),
+    ("Ezekiel", "M"), ("Tobias", "M"), ("Rashid", "M"), ("Lachlan", "M"), ("Desmond", "M"),
+    ("Bartholomew", "M"), ("Nikolai", "M"), ("Emeka", "M"), ("Sung-min", "M"), ("Idris", "M"),
+    ("Caspian", "M"), ("Horacio", "M"), ("Anselm", "M"), ("Bram", "M"), ("Teodoro", "M"),
+    ("Rafferty", "M"), ("Zephyr", "M"), ("Oluwafemi", "M"),
+]
+
+LAST = [
+    "Okafor", "Vandermeer", "Castellanos", "Bergstrom", "Nakagawa", "Achterberg",
+    "Quintanilla", "Fitzwilliam", "Oyelaran", "Dimitrova", "Haverford", "Sandoval",
+    "Brightwater", "Kowalczyk", "Adeyemi", "Thistlewood", "Marchetti", "Nkemelu",
+    "Pemberton", "Sorensen", "Villanueva", "Ashworth", "Beauchamp", "Chandrasekar",
+    "Delacroix", "Eguchi", "Falkenrath", "Gustafsson", "Hollingsworth", "Iyengar",
+    "Jaworski", "Kandinsky", "Lindqvist", "Montenegro", "Novachenko", "Ravensworth",
+]
+
+MIDDLE = [
+    "Chidinma", "Rae", "Oluwaseun", "Beatrix", "Ingram", "Solveig", "Tamsin", "Aurelio",
+    "Mercedes", "Baptiste", "Kealoha", "Evander", "Wisteria", "Osric", "Linnea", "Caradoc",
+]
+
+# City, state, ZIP and the area code that actually serves it -- kept consistent so a form
+# reading "Portland, ME 04101" beside a 503 number cannot be right by luck.
+PLACES = [
+    ("Pittsburgh", "PA", "15206", "412"), ("Tucson", "AZ", "85719", "520"),
+    ("Portland", "ME", "04101", "207"), ("Asheville", "NC", "28806", "828"),
+    ("Duluth", "MN", "55802", "218"), ("Provo", "UT", "84604", "385"),
+    ("Shreveport", "LA", "71105", "318"), ("Bellingham", "WA", "98225", "360"),
+    ("Waterbury", "CT", "06710", "203"), ("Lubbock", "TX", "79410", "806"),
+    ("Rockford", "IL", "61103", "815"), ("Savannah", "GA", "31405", "912"),
+    ("Bozeman", "MT", "59715", "406"), ("Wilmington", "DE", "19805", "302"),
+    ("Fresno", "CA", "93726", "559"), ("Toledo", "OH", "43606", "419"),
+    ("Manchester", "NH", "03104", "603"), ("Sioux Falls", "SD", "57104", "605"),
+    ("Chattanooga", "TN", "37405", "423"), ("Hilo", "HI", "96720", "808"),
+    ("Cheyenne", "WY", "82001", "307"), ("Burlington", "VT", "05401", "802"),
+    ("Albuquerque", "NM", "87106", "505"), ("Spokane", "WA", "99205", "509"),
+]
+
+STREETS = [
+    "Bellefield Avenue", "Kestrel Lane", "Ironwood Court", "Mockingbird Road",
+    "Sable Ridge Drive", "Harlow Street", "Pinecrest Terrace", "Wildacre Boulevard",
+    "Quarry Bend", "Thornfield Way", "Juniper Hollow", "Lantern Hill Road",
+    "Marbury Place", "Silverbrook Trail", "Oakhaven Circle", "Peregrine Street",
+]
+
+EMPLOYERS = [
+    "Riverside Logistics", "Halcyon Dental Group", "Northgate Public Schools",
+    "Wexler Fabrication", "Blue Heron Cooperative", "Sterling Freight",
+    "Maplewood Library System", "Crestline Instruments", "Pelham Grocers",
+    "Torrent Software", "Gilmore Roofing", "Aster Veterinary Clinic",
+    "Fairbanks Transit Authority", "Lockridge Textiles", "Vantage Home Care",
+    "self-employed",
+]
+
+OCCUPATIONS = [
+    "Operations Manager", "Dental Hygienist", "Middle School Teacher", "Welder",
+    "Farm Cooperative Clerk", "Long-Haul Driver", "Reference Librarian",
+    "Calibration Technician", "Produce Buyer", "QA Engineer", "Roofer",
+    "Veterinary Assistant", "Bus Dispatcher", "Loom Operator", "Home Health Aide",
+    "Retired", "Student",
+]
+
+INSURERS = [
+    ("Keystone Health", "KH"), ("Sunridge Mutual", "SM"), ("Pinnacle Care", "PC"),
+    ("Harborview Plan", "HV"), ("Evergreen Choice", "EC"), ("Meridian Benefit", "MB"),
+    ("Calderon Health", "CH"), ("Northstar Assurance", "NA"), ("Bright Meadow", "BM"),
+    ("Ashland Medical", "AM"), ("Trellis Health Plan", "TH"), ("Copperfield Mutual", "CM"),
+    ("Medicaid", "MD"), ("Medicare", "MC"),
+]
+
+PHARMACIES = [
+    "Bellefield Pharmacy", "Corner Drug", "Halsted Apothecary", "Riverbend Pharmacy",
+    "Thrift Drug on Main", "Willow Creek Pharmacy", "Sunset Chemists",
+    "Third Street Drug", "Lakeshore Pharmacy", "Prairie Rx",
+]
+
+PHYSICIAN_TITLES = ["Dr", "Dr.", ""]
+
+LANGUAGES = ["English", "Spanish", "Vietnamese", "Tagalog", "Haitian Creole", "Somali",
+             "Mandarin", "Portuguese", "Arabic", "English"]
+RACES = ["Black/African American", "White", "Asian", "American Indian",
+         "Native Hawaiian", "Two or more races", "Declined"]
+ETHNICITIES = ["Non-Hispanic", "Hispanic or Latino", "Not Hispanic or Latino", "Declined"]
+MARITAL = ["Married", "Single", "Divorced", "Widowed", "Separated", "Partnered"]
+
+# The same ten digits written three ways. Scoring strips punctuation, so this costs the
+# benchmark nothing and tests that a reader is not keyed to one house style.
+PHONE_STYLES = ["{a}-555-{n}", "({a}) 555-{n}", "{a}.555.{n}", "{a} 555 {n}"]
+
+
+def patient_for(key: str) -> dict[str, str]:
+    """A stable, distinct, entirely invented patient for one form."""
+    rng = random.Random(int(hashlib.sha256(key.encode()).hexdigest()[:16], 16))
+
+    first, sex = rng.choice(FIRST)
+    last = rng.choice(LAST)
+    middle = rng.choice(MIDDLE)
+    city, state, zip_code, area = rng.choice(PLACES)
+    street = f"{rng.randrange(12, 9800)} {rng.choice(STREETS)}"
+    style = rng.choice(PHONE_STYLES)
+    # Distinct last-four for home, cell and work, all inside the fiction range.
+    home_n, cell_n, work_n, kin_n = rng.sample(range(100, 200), 4)
+
+    def phone(tail: int) -> str:
+        return style.format(a=area, n=f"01{tail - 100:02d}")
+
+    insurer, prefix = rng.choice(INSURERS)
+    # Relation first, then a name that fits it. Drawn independently this produced
+    # "Saoirse Eguchi -- Brother", which no form would carry and which would make the
+    # corpus read as machine-generated to anyone reviewing it.
+    kin_relation = rng.choice(["Sister", "Brother", "Spouse", "Mother", "Father",
+                               "Daughter", "Son", "Friend", "Neighbour", "Aunt"])
+    kin_sex = {"Sister": "F", "Mother": "F", "Daughter": "F", "Aunt": "F",
+               "Brother": "M", "Father": "M", "Son": "M"}.get(kin_relation)
+    kin_first = rng.choice(
+        [n for n, s in FIRST if n != first and (kin_sex is None or s == kin_sex)]
+    )
+    # Same surname for a blood relative, a different one for a friend or neighbour.
+    kin_last = last if kin_relation in {"Sister", "Brother", "Mother", "Father",
+                                        "Daughter", "Son", "Spouse"} else rng.choice(LAST)
+    title = rng.choice(PHYSICIAN_TITLES)
+    doctor = f"{title} {rng.choice(FIRST)[0]} {rng.choice(LAST)}".strip()
+
+    born_year = rng.randrange(1938, 2007)
+    born = f"{rng.randrange(1, 13):02d}/{rng.randrange(1, 29):02d}/{born_year}"
+    # A sixteen-year-old is not a Reference Librarian and an eighty-year-old is rarely a
+    # Welder. Age does not affect scoring, but a corpus full of impossible people is one
+    # nobody can review by eye for the placement errors that *do* affect scoring.
+    if born_year > 2004:
+        occupation = "Student"
+    elif born_year < 1955:
+        occupation = rng.choice(["Retired", "Retired", rng.choice(OCCUPATIONS)])
+    else:
+        occupation = rng.choice([o for o in OCCUPATIONS if o not in ("Retired", "Student")])
+    # Numeric, always. `form_analyzer.normalize` rewrites "August 25 2026" to an ISO date
+    # and leaves "08/25/2026" alone, so a spelled-out month would score the normaliser
+    # rather than the reader.
+    today = f"{rng.randrange(1, 10):02d}/{rng.randrange(1, 29):02d}/2026"
+
+    return {
+        "full_name": f"{first} {middle[0]} {last}",
+        "first_name": first,
+        "last_name": last,
+        "middle_name": middle,
+        "preferred_name": first[: rng.randrange(3, 5)],
+        "dob": born,
+        "ssn": f"9{rng.randrange(10, 100)}-{rng.randrange(10, 100)}-{rng.randrange(1000, 10000)}",
+        "sex": "Female" if sex == "F" else "Male",
+        "marital_status": rng.choice(MARITAL),
+        "address": street,
+        "city": city,
+        "state": state,
+        "zip": zip_code,
+        "home_phone": phone(home_n),
+        "cell_phone": phone(cell_n),
+        "work_phone": phone(work_n),
+        "phone": phone(home_n),
+        "email": f"{first.lower()}.{last.lower()}@example.com",
+        "employer": rng.choice(EMPLOYERS),
+        "occupation": occupation,
+        "emergency_contact": f"{kin_first} {kin_last}",
+        "emergency_phone": phone(kin_n),
+        "relationship": kin_relation,
+        "language": rng.choice(LANGUAGES),
+        "race": rng.choice(RACES),
+        "ethnicity": rng.choice(ETHNICITIES),
+        "insurance_name": insurer,
+        "insurance_id": f"{prefix}{rng.randrange(100000000, 999999999)}",
+        "group_id": f"GRP{rng.randrange(10000, 99999)}",
+        "pharmacy": rng.choice(PHARMACIES),
+        "physician": doctor,
+        "date": today,
+    }
 
 # Printed label -> which invented value answers it. Longest labels are tried first so
 # "Emergency Contact Name" is not matched by the bare "Name" pattern.
@@ -214,9 +378,77 @@ def find_label(page, label: str):
     for text, bbox, size in label_runs(page):
         if not _is_caption(text, label):
             continue
-        if pattern.search(text):
-            return (text, bbox, size)
+        found = pattern.search(text)
+        if found:
+            return (text, bbox, size, found)
     return None
+
+
+# At least this many rule characters after a label before the run is read as the space
+# offered to write in. Three, so a hyphenated word inside a caption is not mistaken for one.
+_RULE_RUN = re.compile(r"[ \t]*([_.\u00b7\u2024\u2025\u2026\-]{3,})")
+
+
+def _span_x(text: str, bbox: tuple[float, float, float, float], upto: str) -> float:
+    """Where inside a span the characters `upto` end, in page coordinates.
+
+    A form's whole row is often one span -- "Address ______ City ______ S" arrives as a
+    single run of text -- and writing after the *span* put the value past the end of the
+    row, where there is no room and no field. Twelve of one form's twelve labels were
+    refused for exactly this, and eight forms filled nothing at all.
+
+    The span's font is not known here (PyMuPDF reports a name this module cannot load), so
+    the position is measured proportionally: Helvetica's width for the prefix over its
+    width for the whole string, applied to the width the span actually occupies. A span is
+    one font by definition, so the ratio holds whatever that font is.
+    """
+    whole = fitz.get_text_length(text, fontname=FONT, fontsize=10) or 1.0
+    part = fitz.get_text_length(upto, fontname=FONT, fontsize=10)
+    return bbox[0] + (bbox[2] - bbox[0]) * (part / whole)
+
+
+def _exact_x(page, bbox, needle: str, edge: str) -> float | None:
+    """The true left or right edge of `needle` inside this span, or None if not found.
+
+    Measuring proportionally was close but not close enough: on a bold caption it put the
+    value hard against the label -- "Patient Occupation/EmployerRiverside Logistics" --
+    which the eye separates by colour but OCR returns as one token, making the field
+    unrecoverable and the benchmark unfair. PyMuPDF can report where a substring actually
+    sits, which is exact and needs no font metrics; the proportional measure stays as the
+    fallback for the spans it cannot find.
+    """
+    pad = fitz.Rect(bbox[0] - 1, bbox[1] - 1, bbox[2] + 1, bbox[3] + 1)
+    for rect in page.search_for(needle, clip=pad):
+        return rect.x1 if edge == "end" else rect.x0
+    return None
+
+
+def write_point(page, text, bbox, found) -> tuple[float, float | None]:
+    """Where a value answering this label should start, and where it must stop.
+
+    Two shapes of row. When the label is followed by a rule inside its own span the value
+    belongs on that rule and must not run past it -- past it is the next field's label,
+    and on these forms a whole row arrives as one span: "Address ____ City ____ State".
+    Writing after the *span* put the value past the end of the row, where there is no room
+    and no field; twelve of one form's twelve labels were refused for exactly that, and
+    eight forms filled nothing at all.
+
+    When the span ends at the label, the space after the span is the answer area and only
+    the next printed thing on the line limits it.
+    """
+    tail = text[found.end():]
+    run = _RULE_RUN.match(tail)
+    label = text[found.start():found.end()].strip()
+    ends = _exact_x(page, bbox, label, "end")
+    if ends is None:
+        ends = _span_x(text, bbox, text[: found.end()])
+    if not run:
+        return bbox[2] + GAP_PT, None
+    after = tail[run.end():].strip()
+    cap = _exact_x(page, bbox, after.split()[0], "start") if after else None
+    if cap is None:
+        cap = _span_x(text, bbox, text[: found.end() + run.end()]) if after else bbox[2]
+    return ends + GAP_PT, cap
 
 
 # A heading and a field's caption read alike -- "Emergency Contact" is both, on different
@@ -239,11 +471,15 @@ def _is_a_rule(text: str) -> bool:
     return bool(text.strip()) and not any(c.isalnum() for c in text)
 
 
-def free_space(page, x: float, baseline: float, size: float) -> float:
-    """How far the value may run before it hits the next printed thing on this line."""
-    limit = page.rect.x1 - 20
+def free_space(page, x: float, baseline: float, size: float, own=None, cap=None) -> float:
+    """How far the value may run before it hits the next printed thing on this line.
+
+    `own` is the span the label was found in, excluded because the value is being written
+    *inside* it, on its rule; `cap` is where that rule ends.
+    """
+    limit = page.rect.x1 - 20 if cap is None else cap
     for text, bbox, _ in label_runs(page):
-        if not text.strip():
+        if not text.strip() or bbox == own:
             continue
         # Same line, and starting to the right of where the value would begin. Widening
         # this was tried, to catch a heading and the question set beside it on slightly
@@ -276,7 +512,62 @@ def free_space(page, x: float, baseline: float, size: float) -> float:
     return limit - x
 
 
-def fill_page(page, *, check: bool) -> tuple[dict[str, str], list[str]]:
+# --- fillable PDFs -----------------------------------------------------------------
+#
+# 23 of the 86 forms in LARGE carry AcroForm widgets: the clinic published a PDF meant to
+# be typed into. On those the answer space is a widget rather than a printed rule, so the
+# rule-finding pass above sees a caption with nothing after it and fills almost nothing --
+# one form went 302 widgets to a single field.
+#
+# A widget carries the form designer's own name for the field, which is ground truth
+# nobody here invented. Only an *exact* name match is used: "First name" answers
+# `first_name`, while "demographic t 7" -- which is most of them -- is left alone. Guessing
+# from a widget's position would be inferring the form's layout, which is the extractor's
+# job and would make the benchmark circular.
+
+
+def _widget_key(name: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).split())
+
+
+WIDGET_LABELS = {_widget_key(label): (label, key) for label, key in LABELS.items()}
+
+
+def fill_widgets(
+    page, patient: dict[str, str], skip: set[str], *, check: bool
+) -> tuple[dict[str, str], list[str]]:
+    written: dict[str, str] = {}
+    skipped: list[str] = []
+    for widget in page.widgets():
+        if widget.field_type_string != "Text":
+            continue
+        known = WIDGET_LABELS.get(_widget_key(widget.field_name))
+        if not known:
+            continue
+        label, key = known
+        if key not in patient or label in skip or label in written:
+            continue
+        if (widget.field_value or "").strip():
+            continue  # the publisher pre-filled it; leave their value alone
+        # A widget the value cannot be read out of is not a field, it is a defect in the
+        # benchmark: "Black/African American" typed into a checkbox-sized box renders as an
+        # illegible smudge, and the ground truth would then assert that a reader should
+        # recover a string nobody can see. Seven points is the floor Tesseract is reliable
+        # at 150dpi; below that the widget is left blank and reported.
+        room = widget.rect.width - 4
+        if fitz.get_text_length(patient[key], fontname=FONT, fontsize=7.0) > room:
+            skipped.append(f"{label} (widget too small)")
+            continue
+        written[label] = patient[key]
+        if not check:
+            widget.field_value = patient[key]
+            widget.update()
+    return written, skipped
+
+
+def fill_page(
+    page, patient: dict[str, str], skip: set[str] = frozenset(), *, check: bool
+) -> tuple[dict[str, str], list[str]]:
     written: dict[str, str] = {}
     skipped: list[str] = []
     # A shorter label is a substring of a longer one -- "Zip" inside "Zip Code:", "Email"
@@ -289,26 +580,30 @@ def fill_page(page, *, check: bool) -> tuple[dict[str, str], list[str]]:
     # address got written onto the email line. Ordering by length makes the more specific
     # label win wherever one label contains another.
     for label, key in sorted(LABELS.items(), key=lambda kv: -len(kv[0])):
-        if key not in PATIENT or label in written:
+        if key not in patient or label in written or label in skip:
             continue
         found = find_label(page, label)
         if not found:
             continue
-        _text, bbox, size = found
+        text, bbox, size, at = found
+        size = max(7.0, min(size, 12.0))
+        x, cap = write_point(page, text, bbox, at)
+        baseline = bbox[3] - size * 0.22
+        value = patient[key]
+        needed = fitz.get_text_length(value, fontname=FONT, fontsize=size)
+        # Claim the space the value will occupy, not the span it was found in. Real rows
+        # carry three fields in one span -- "Address ____ City ____ State" -- and claiming
+        # the span meant the first label on a row silently refused the other two.
+        here = (x, bbox[1], x + needed, bbox[3])
         if any(
-            bbox[0] < c[2] and c[0] < bbox[2] and bbox[1] < c[3] and c[1] < bbox[3]
+            here[0] < c[2] and c[0] < here[2] and here[1] < c[3] and c[1] < here[3]
             for c in claimed
         ):
             continue
-        claimed.append(bbox)
-        size = max(7.0, min(size, 12.0))
-        x = bbox[2] + GAP_PT
-        baseline = bbox[3] - size * 0.22
-        value = PATIENT[key]
-        needed = fitz.get_text_length(value, fontname=FONT, fontsize=size)
-        if needed > free_space(page, x, (bbox[1] + bbox[3]) / 2, size):
+        if needed > free_space(page, x, (bbox[1] + bbox[3]) / 2, size, own=bbox, cap=cap):
             skipped.append(f"{label} (no room)")
             continue
+        claimed.append(here)
         if not check:
             page.insert_text((x, baseline), value, fontname=FONT, fontsize=size, color=INK)
         written[label] = value
@@ -317,25 +612,45 @@ def fill_page(page, *, check: bool) -> tuple[dict[str, str], list[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default="data/real-forms/NEW")
+    ap.add_argument("--dir", default="data/real-forms/LARGE")
     ap.add_argument("--check", action="store_true", help="report only, write nothing")
-    ap.add_argument("--pages", type=int, default=2, help="how many pages to fill")
+    # Diagnostic only. Fills every form with the *same* patient, which is what the
+    # corpus wrongly was until 2026-09-13. Its one use is measuring how much a repeated
+    # identity inflates a score: same forms, same placement, only the values differ.
+    ap.add_argument("--same-patient", action="store_true", help=argparse.SUPPRESS)
+    # Six, not two. These are packets: a welcome letter, a HIPAA notice and a financial
+    # policy commonly sit ahead of the registration page, and at two pages fourteen
+    # forms filled nothing or nearly nothing because their fields start on page 3.
+    ap.add_argument("--pages", type=int, default=6, help="how many pages to fill")
+    # A second fill of the same blanks with a *different* patient per form, for measuring
+    # what a template learns from one fill on another: the enrolled track's whole claim.
+    ap.add_argument("--variant", default="", help="seed suffix: a different patient per form")
     args = ap.parse_args()
 
     folder = ROOT / args.dir
     truth: dict[str, dict[str, str]] = {}
+    patients: dict[str, str] = {}
     for pdf in sorted(folder.glob("*.pdf")):
         if pdf.stem.endswith("_FILLED"):
             continue
         doc = fitz.open(pdf)
+        # Seeded from the form's name, so this form always draws this patient.
+        patient = patient_for(
+            "one-patient" if args.same_patient else f"{pdf.stem}#{args.variant}".rstrip("#")
+        )
         all_written: dict[str, str] = {}
-        first_page: dict[str, str] = {}
+        per_page: list[dict[str, str]] = []
         notes: list[str] = []
         for index in range(min(args.pages, doc.page_count)):
-            written, skipped = fill_page(doc[index], check=args.check)
+            page = doc[index]
+            # Widgets first: where a form offers a typed field, that is where the answer
+            # goes, and the printed caption beside it has no rule to write on anyway.
+            typed, tight = fill_widgets(page, patient, set(all_written), check=args.check)
+            all_written.update(typed)
+            notes += tight
+            written, skipped = fill_page(page, patient, set(all_written), check=args.check)
             all_written.update(written)
-            if index == 0:
-                first_page.update(written)
+            per_page.append({**typed, **written})
             notes += skipped
         print(f"\n{pdf.name}: {len(all_written)} fields filled")
         for label, value in all_written.items():
@@ -345,15 +660,25 @@ def main() -> int:
         if args.check or not all_written:
             continue
         out = pdf.with_name(f"{pdf.stem}_FILLED.pdf")
+        # Flatten typed values into the page itself. Left as live widgets they are
+        # invisible to `page.get_text()`, so the PDF reader would be scored against
+        # answers it has no way to see; baked, a fillable form is exactly what a patient
+        # prints, which is the artefact the rest of the corpus already is.
+        doc.bake()
         doc.save(out)
-        jpg = out.with_name(f"{out.stem}_page1.jpg")
-        doc[0].get_pixmap(dpi=DPI).pil_save(jpg, quality=92)
+        # Render the page that actually carries answers, not always page 1. Half these
+        # packets open with a welcome letter, so a page-1 render was a picture of prose
+        # and the image half of the benchmark scored almost nothing.
+        best = max(range(len(per_page)), key=lambda i: len(per_page[i]))
+        jpg = out.with_name(f"{out.stem}_page{best + 1}.jpg")
+        doc[best].get_pixmap(dpi=DPI).pil_save(jpg, quality=92)
         # Truth is recorded per artefact, not per form: the PDF carries every page, the
-        # page-1 render carries only what was written on page 1. Keying page-2 answers to
-        # a page-1 image would score fields against a picture that never contained them.
+        # render carries only what was written on the page rendered. Keying another page's
+        # answers to it would score fields against a picture that never contained them.
         truth[out.name] = all_written
-        if first_page:
-            truth[jpg.name] = first_page
+        patients[out.name] = patient["full_name"]
+        if per_page[best]:
+            truth[jpg.name] = per_page[best]
 
     if truth and not args.check:
         record = folder / "ground_truth_new.json"
@@ -365,8 +690,9 @@ def main() -> int:
                         "scripts/fill_forms.py, which places each value beside its own "
                         "printed label using the PDF's text layer and never imports the "
                         "extractor. Patient is invented. UNTUNED: nothing has been fixed "
-                        "against these."
+                        "against these. A different invented patient per form."
                     ),
+                    "_patients": patients,
                     **truth,
                 },
                 indent=2,

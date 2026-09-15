@@ -49,6 +49,9 @@ def test_erasing_leaves_content_outside_the_box_untouched():
         ("Insurance ID #", "insurance_id"),
         ("", "field"),
         ("123 Numeric", "f_123_numeric"),
+        ("F", "field_f"),
+        ("#", "field"),
+        ("M", "field_m"),
     ],
 )
 def test_slug_matches_the_field_id_pattern(label, expected):
@@ -91,3 +94,106 @@ def test_values_are_offered_under_both_canonical_and_label_keys():
     assert values["patient.email"] == "a@b.com"
     assert values["email"] == "a@b.com", "canonical fields still need their label key"
     assert values["blood_group"] == "O+", "unmapped fields resolve by label alone"
+
+
+class TestWidgetGeometry:
+    """A fillable PDF's text widgets are the designer's own answer spaces."""
+
+    def _pdf_with_widgets(self, tmp_path):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        text = fitz.Widget()
+        text.field_name = "Last Name"
+        text.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+        text.rect = fitz.Rect(100, 100, 300, 120)
+        page.add_widget(text)
+        tick = fitz.Widget()
+        tick.field_name = "Male"
+        tick.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+        tick.rect = fitz.Rect(100, 200, 112, 212)
+        page.add_widget(tick)
+        path = tmp_path / "form.pdf"
+        doc.save(path)
+        return path
+
+    def test_text_widgets_arrive_in_render_pixels(self, tmp_path):
+        from app.services.form_analyzer import PDF_RENDER_SCALE, widget_boxes
+
+        boxes = widget_boxes(self._pdf_with_widgets(tmp_path), 0)
+        assert len(boxes) == 1, "the tick box is not an answer space"
+        assert boxes[0] == (100 * PDF_RENDER_SCALE, 100 * PDF_RENDER_SCALE,
+                            300 * PDF_RENDER_SCALE, 120 * PDF_RENDER_SCALE)
+
+    def test_a_page_without_widgets_yields_nothing(self, tmp_path):
+        from app.services.form_analyzer import widget_boxes
+
+        assert widget_boxes(self._pdf_with_widgets(tmp_path), 1) == []
+
+    def test_a_missing_pdf_yields_nothing(self, tmp_path):
+        from app.services.form_analyzer import widget_boxes
+
+        assert widget_boxes(tmp_path / "absent.pdf", 0) == []
+
+
+def test_every_template_page_has_its_own_master():
+    from app.services.templates import preview_name
+
+    # Page 0 keeps the name templates learned before pages existed already use.
+    assert preview_name(0) == "blank_preview.png"
+    assert preview_name(2) == "blank_preview_p2.png"
+
+
+class TestLearningFromCorrections:
+    """A reviewer's word on where an answer lives becomes that caption's slot."""
+
+    def _template(self, tmp_path, monkeypatch):
+        from app.schemas.models import TemplateDefinition, TemplatePage
+        from app.services import template_builder as B
+
+        definition = TemplateDefinition(
+            template_id="T50", template_name="t", version=1, page_count=1,
+            pages=[TemplatePage(page_index=0, canonical_width=100, canonical_height=100,
+                                fields=[])],
+        )
+        folder = tmp_path / "T50"
+        folder.mkdir()
+        (folder / "template.json").write_text(definition.model_dump_json())
+        monkeypatch.setattr(B, "DERIVED_ROOT", tmp_path)
+        monkeypatch.setattr(B.registry, "get", lambda _id: definition)
+        monkeypatch.setattr(B.registry, "load", lambda: None)
+        return B
+
+    def test_a_correction_becomes_a_slot_under_the_vocabulary_key(self, tmp_path, monkeypatch):
+        from app.schemas.models import BoundingBox, SlotCorrection
+
+        B = self._template(tmp_path, monkeypatch)
+        taught = B.learn_corrections("T50", [SlotCorrection(
+            page_index=0, label="Last Name",
+            bbox=BoundingBox(x=0.2, y=0.1, width=0.3, height=0.03))])
+        (slot,) = taught.pages[0].fields
+        assert slot.field_id == "patient.last_name" and slot.label == "Last Name"
+        assert slot.printed_text is None, "no master image, nothing known to be printed"
+
+    def test_a_second_correction_for_the_same_caption_replaces_the_first(self, tmp_path, monkeypatch):
+        from app.schemas.models import BoundingBox, SlotCorrection
+
+        B = self._template(tmp_path, monkeypatch)
+        first = SlotCorrection(page_index=0, label="City",
+                               bbox=BoundingBox(x=0.1, y=0.5, width=0.2, height=0.03))
+        second = SlotCorrection(page_index=0, label="City",
+                                bbox=BoundingBox(x=0.6, y=0.5, width=0.2, height=0.03))
+        taught = B.learn_corrections("T50", [first, second])
+        (slot,) = taught.pages[0].fields
+        assert slot.bbox.x == 0.6
+
+    def test_a_page_the_blank_never_taught_is_added_in_order(self, tmp_path, monkeypatch):
+        from app.schemas.models import BoundingBox, SlotCorrection
+
+        B = self._template(tmp_path, monkeypatch)
+        taught = B.learn_corrections("T50", [SlotCorrection(
+            page_index=2, label="Employer",
+            bbox=BoundingBox(x=0.1, y=0.5, width=0.2, height=0.03))])
+        assert [p.page_index for p in taught.pages] == [0, 1, 2] and taught.page_count == 3
+        assert taught.pages[2].fields[0].field_id == "employment.employer"

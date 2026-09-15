@@ -1,7 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.models import BoundingBox, ExtractedField, ExtractionSource, FieldType
+from app.schemas.form_understanding import DetectedFormField
+from app.schemas.models import BoundingBox
 
 
 def test_bbox_must_remain_inside_page():
@@ -9,17 +10,25 @@ def test_bbox_must_remain_inside_page():
         BoundingBox(x=0.9, y=0.1, width=0.2, height=0.1)
 
 
+def _minimal_field() -> dict:
+    box = {"x": 0, "y": 0, "width": 0.1, "height": 0.1}
+    return {
+        "field_id": "x", "page_index": 0, "label_text": "X", "normalized_label": "x",
+        "field_type": "short_text", "label_bbox": box, "answer_bbox": box,
+        "required_status": "unknown", "required_confidence": 0.3, "detection_confidence": 0.9,
+        "source": "ocr", "canonical_key": None, "mapping_confidence": 0.0, "mapping_reason": "",
+        "raw_value": None, "normalized_value": None, "is_blank": True, "confidence": 0.5,
+        "needs_review": True,
+    }
+
+
 def test_confidence_bounds_are_enforced():
+    """The API contract carries a 0-1 confidence; a reader that emits more is a bug the
+    schema should catch, not the UI. The baseline must validate first, or the test could
+    pass on an unrelated missing field."""
+    DetectedFormField.model_validate(_minimal_field())
     with pytest.raises(ValidationError):
-        ExtractedField(
-            field_id="x",
-            label="X",
-            field_type=FieldType.DATE,
-            bbox=BoundingBox(x=0, y=0, width=0.1, height=0.1),
-            confidence=1.1,
-            source=ExtractionSource.OCR,
-            needs_review=False,
-        )
+        DetectedFormField.model_validate({**_minimal_field(), "confidence": 1.1})
 
 
 def _heif(brand: bytes = b"ftypheic") -> bytes:
@@ -118,3 +127,16 @@ def test_a_derived_template_can_be_released_but_a_corpus_one_cannot(tmp_path, mo
     # Absent, or a corpus id that was never under DERIVED_ROOT: nothing to remove.
     assert T.release("T50") is False
     assert T.release("T01") is False
+
+
+def test_more_than_fifty_derived_templates_can_exist():
+    from app.schemas.models import TemplateDefinition, TemplatePage
+
+    for template_id in ("T50", "T99", "T100", "T9999"):
+        TemplateDefinition(
+            template_id=template_id,
+            template_name="x",
+            version=1,
+            page_count=1,
+            pages=[TemplatePage(page_index=0, canonical_width=10, canonical_height=10, fields=[])],
+        )

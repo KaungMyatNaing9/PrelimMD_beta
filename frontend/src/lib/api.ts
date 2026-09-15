@@ -1,9 +1,4 @@
-import { Run } from "./schemas";
 const BASE=process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-export async function upload(file: File, templateId?: string){const body=new FormData();body.append("file",file);if(templateId)body.append("template_id",templateId);const r=await fetch(`${BASE}/api/v1/captures`,{method:"POST",body});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{run_id:string}>}
-export async function extract(id:string){const r=await fetch(`${BASE}/api/v1/runs/${id}/extract`,{method:"POST"});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<Run>}
-export async function getRun(id:string){const r=await fetch(`${BASE}/api/v1/runs/${id}`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<Run>}
-export async function correct(id:string,field:string,value:unknown){const r=await fetch(`${BASE}/api/v1/runs/${id}/fields/${field}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({value,reviewed:true})});if(!r.ok)throw new Error(await r.text())}
 export const imageUrl=(path:string)=>`${BASE}${path}`;
 export const regenerateUrl=(id:string)=>`${BASE}/api/v1/form-analyses/${id}/regenerate`;
 export async function deriveTemplate(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/derive-template`,{method:"POST"});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{template_id:string;field_count:number}>}
@@ -12,6 +7,10 @@ export async function analyze(files:File|File[]){const body=new FormData();const
 // stays for PDFs and for anything already calling this.
 if(list.length===1)body.append("file",list[0]);else list.forEach(f=>body.append("files",f));const r=await fetch(`${BASE}/api/v1/form-analyses`,{method:"POST",body});if(!r.ok)throw new Error(await r.text());return r.json()}
 export async function getAnalysis(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return r.json()}
+export type SlotCorrection={page_index:number;label:string;bbox:{x:number;y:number;width:number;height:number};value?:string|null};
+// A reviewer's word on where an answer lives teaches the matched template: the slot is
+// read there on every later copy of the form. Positions are page fractions.
+export async function teachTemplate(templateId:string,corrections:SlotCorrection[]){const r=await fetch(`${BASE}/api/v1/templates/${templateId}/corrections`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(corrections)});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{template_id:string;page_count:number;field_count:number}>}
 export async function correctAnalysis(id:string,field:string,value:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/fields/${field}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({value,reviewed:true})});if(!r.ok)throw new Error(await r.text())}
 export type StoredForm={analysis_id:string;source_type:string;field_count:number;review_count:number;matched_known_template:string|null;stored_at:string};
 export async function listAnalyses(){const r=await fetch(`${BASE}/api/v1/form-analyses`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return (await r.json()).analyses as StoredForm[]}

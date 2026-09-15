@@ -9,15 +9,14 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.schemas.form_understanding import Attestation, FieldRevision
-from app.schemas.models import ExtractionSource
+from app.schemas.models import SlotCorrection
 from app.services import audit_store
 from app.services.capture import new_run_dir, preprocess, save_upload
-from app.services.extraction import extract_run, read_run, write_run
 from app.services.fhir import to_questionnaire_response
 from app.services.form_analyzer import FormAnalyzer
 from app.services.regeneration import regenerate, unplaced, values_from_analysis
-from app.services.template_builder import derive_template
-from app.services.templates import MATCH_THRESHOLD, registry
+from app.services.template_builder import derive_template, learn_corrections
+from app.services.templates import registry
 
 app = FastAPI(title="PrelimMD", version="0.1.0")
 app.add_middleware(
@@ -452,6 +451,27 @@ def analysis_as_fhir(analysis_id: str, questionnaire: str | None = None,
     )
 
 
+@app.post("/api/v1/templates/{template_id}/corrections", status_code=200)
+def teach_template(template_id: str, corrections: list[SlotCorrection]):
+    """Teach a template where a reviewer says its answers live.
+
+    The blank taught where the form offers space; a reviewer looking at a filled copy says
+    where an answer is. Each correction names a caption, a page and a region, and becomes
+    (or replaces) that caption's slot, so every later copy of the form is read there.
+    """
+    try:
+        definition = learn_corrections(template_id, corrections)
+    except KeyError as exc:
+        raise HTTPException(404, f"Unknown template {template_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "template_id": definition.template_id,
+        "page_count": definition.page_count,
+        "field_count": sum(len(page.fields) for page in definition.pages),
+    }
+
+
 @app.delete("/api/v1/templates/{template_id}", status_code=200)
 def release_template(template_id: str):
     """Remove a template that was learned at runtime.
@@ -488,8 +508,8 @@ def derive_template_from_analysis(analysis_id: str, template_name: str | None = 
     return {
         "template_id": definition.template_id,
         "template_name": definition.template_name,
-        "field_count": len(definition.pages[0].fields),
-        "fields": [f.field_id for f in definition.pages[0].fields],
+        "field_count": sum(len(page.fields) for page in definition.pages),
+        "fields": [f.field_id for page in definition.pages for f in page.fields],
     }
 
 
@@ -557,106 +577,3 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
             "X-Unplaced-Fields": ",".join(missing),
         },
     )
-
-
-@app.post("/api/v1/captures", status_code=202)
-@app.post("/api/v1/capture", status_code=202, include_in_schema=False)
-async def create_capture(
-    file: UploadFile = File(...),
-    template_id: str | None = Form(None),
-    sample_id: str | None = Form(None),
-):
-    run_id, folder = new_run_dir()
-    source, kind = await save_upload(file, folder)
-    result = preprocess(source, kind, folder)
-    try:
-        import cv2
-    except ImportError as exc:
-        raise HTTPException(503, "OpenCV template matching dependency is unavailable") from exc
-    image = cv2.imread(str(folder / "normalized_color.png"))
-    template, score = registry.match(image, template_id)
-    if template is None or score < MATCH_THRESHOLD:
-        raise HTTPException(
-            422,
-            detail={
-                "code": "TEMPLATE_ALIGNMENT_FAILED",
-                "message": "No approved template matched this page.",
-            },
-        )
-    (folder / "capture.json").write_text(result.model_dump_json(indent=2))
-    (folder / "template_id.txt").write_text(template.template_id)
-    return {
-        "schema_version": "1.0",
-        "run_id": run_id,
-        "status": "captured",
-        "template_id": template.template_id,
-        "template_match_confidence": score,
-        "pages": [result.model_dump()],
-    }
-
-
-@app.post("/api/v1/runs/{run_id}/extract")
-def extract(run_id: str):
-    folder = run_dir(run_id)
-    template = registry.get((folder / "template_id.txt").read_text().strip())
-    run = extract_run(run_id, folder, template)
-    write_run(folder, run)
-    return run
-
-
-@app.get("/api/v1/runs/{run_id}")
-def get_run(run_id: str):
-    return read_run(run_dir(run_id))
-
-
-@app.get("/api/v1/runs/{run_id}/pages/{page_index}/image")
-def page_image(run_id: str, page_index: int):
-    if page_index != 0:
-        raise HTTPException(404, "Page not found")
-    path = run_dir(run_id) / "aligned.png"
-    if not path.exists():
-        path = run_dir(run_id) / "normalized_color.png"
-    return FileResponse(path, media_type="image/png")
-
-
-@app.get("/api/v1/runs/{run_id}/pages/{page_index}/overlay")
-def page_overlay(run_id: str, page_index: int):
-    """Lightweight SVG debug artifact for API smoke tests and overlay inspection."""
-    if page_index != 0:
-        raise HTTPException(404, "Page not found")
-    page = read_run(run_dir(run_id)).pages[0]
-    rectangles = "".join(
-        f'<rect x="{field.bbox.x * page.width:.2f}" y="{field.bbox.y * page.height:.2f}" '
-        f'width="{field.bbox.width * page.width:.2f}" height="{field.bbox.height * page.height:.2f}" '
-        f'fill="none" stroke="{"#d17200" if field.needs_review else "#1d9a61"}" stroke-width="2">'
-        f"<title>{field.label}</title></rect>"
-        for field in page.fields
-    )
-    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{page.width}" height="{page.height}" viewBox="0 0 {page.width} {page.height}">{rectangles}</svg>'
-    return Response(svg, media_type="image/svg+xml")
-
-
-@app.patch("/api/v1/runs/{run_id}/fields/{field_id}")
-def correct(run_id: str, field_id: str, correction: Correction):
-    folder = run_dir(run_id)
-    run = read_run(folder)
-    for field in run.pages[0].fields:
-        if field.field_id == field_id:
-            field.alternatives.append(
-                {
-                    "raw_value": field.raw_value,
-                    "normalized_value": field.normalized_value,
-                    "source": field.source,
-                }
-            )
-            field.raw_value = correction.value
-            field.normalized_value = correction.value
-            field.source = ExtractionSource.HUMAN_CORRECTED
-            field.needs_review = not correction.reviewed
-            field.confidence = 1.0
-            field.validation_errors = []
-            run.summary.review_count = sum(f.needs_review for f in run.pages[0].fields)
-            run.status = "completed" if not run.summary.review_count else "completed_with_review"
-            write_run(folder, run)
-            return field
-    raise HTTPException(404, "Field not found")

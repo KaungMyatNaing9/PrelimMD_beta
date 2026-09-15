@@ -82,3 +82,18 @@ def test_an_unmapped_field_is_not_punished_for_having_no_type():
     """A value with no type known scores mid-range, not zero, or every unmapped field
     would lose to any mapped one regardless of what it holds."""
     assert 0 < plausible("Riverside Logistics", None) < CERTAIN
+
+
+def test_an_email_with_an_underscore_is_not_furniture():
+    from app.schemas.models import FieldType
+    from app.services.field_validity import CERTAIN, plausible
+
+    assert plausible("noor_k@example.com", FieldType.SHORT_TEXT) == CERTAIN
+
+
+def test_a_date_with_spaced_separators_is_still_a_date():
+    from app.schemas.models import FieldType
+    from app.services.field_validity import CERTAIN, IMPLAUSIBLE, plausible
+
+    assert plausible("04 / 17 / 1986", FieldType.DATE) == CERTAIN
+    assert plausible("STREET,", FieldType.DATE) == IMPLAUSIBLE

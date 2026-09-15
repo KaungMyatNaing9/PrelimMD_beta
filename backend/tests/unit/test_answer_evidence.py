@@ -217,3 +217,21 @@ class TestLetterheadIsNotAField:
         # `MI` is a real field -- middle initial -- on the benchmark forms.
         for label in ["MI", "DOB", "Last Name", "SSN"]:
             assert not _is_letterhead(label), label
+
+
+class TestSeveralBlanks:
+    """Words between rule runs mean the reading crossed more than one writing line."""
+
+    def test_a_tick_row_drawn_as_rules_is_not_an_answer(self):
+        from app.services.form_analyzer import _spans_several_blanks
+
+        assert _spans_several_blanks("__ Male __ Female")
+        assert _spans_several_blanks("Home ______ Cell ______ Work")
+
+    def test_one_blank_with_its_value_is_left_alone(self):
+        from app.services.form_analyzer import _spans_several_blanks
+
+        assert not _spans_several_blanks("____________ Gustafsson")
+        assert not _spans_several_blanks("Waterbury ____________")
+        assert not _spans_several_blanks("noor_k@example.com")
+        assert not _spans_several_blanks(None)

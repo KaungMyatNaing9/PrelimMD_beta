@@ -47,6 +47,9 @@ def plausible(value, field_type: FieldType | None) -> float:
     text = str(value).strip()
     if not text:
         return IMPLAUSIBLE
+    # An e-mail address is allowed its underscore: "noor_k@example.com" is not a rule.
+    if EMAIL.match(text):
+        return CERTAIN
     # Furniture is the failure both readers make, whatever the field claims to be.
     if FURNITURE.search(text):
         return IMPLAUSIBLE
@@ -58,7 +61,9 @@ def plausible(value, field_type: FieldType | None) -> float:
         # A seven-digit local number is real but rarer on an intake form than a fragment.
         return LIKELY if len(digits) == 7 else IMPLAUSIBLE
     if field_type == FieldType.DATE:
-        return CERTAIN if DATE.match(text) else IMPLAUSIBLE
+        # A PDF text layer hands over a date typed into boxed cells as "04 / 17 / 1986";
+        # the spaces around the separators are the cells, not the date.
+        return CERTAIN if DATE.match(re.sub(r"\s*([-/.])\s*", r"\1", text)) else IMPLAUSIBLE
     if field_type == FieldType.NUMBER:
         return CERTAIN if text.replace(".", "", 1).isdigit() else IMPLAUSIBLE
     if field_type == FieldType.INSURANCE_ID:

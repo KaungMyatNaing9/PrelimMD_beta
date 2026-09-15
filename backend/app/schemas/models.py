@@ -1,7 +1,7 @@
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 SCHEMA_VERSION: Literal["1.0"] = "1.0"
 
@@ -17,14 +17,6 @@ class FieldType(str, Enum):
     MULTIPLE_CHOICE = "multiple_choice"
     MEDICATION_LIST = "medication_list"
     SIGNATURE_PRESENCE = "signature_presence"
-
-
-class ExtractionSource(str, Enum):
-    TEMPLATE = "template"
-    OCR = "ocr"
-    VISION = "vision"
-    OCR_VISION_FUSED = "ocr_vision_fused"
-    HUMAN_CORRECTED = "human_corrected"
 
 
 class BoundingBox(BaseModel):
@@ -69,12 +61,31 @@ class TemplateField(BaseModel):
     # differs between forms, and picking any single constant fits whichever form it was
     # chosen against and misplaces the others.
     text_indent: float | None = Field(default=None, ge=0, le=1)
+    # What the blank form prints *inside* this region -- a sub-caption, the options of a
+    # tick row, the neighbouring caption a box drawn a little wide has caught. Read from
+    # the blank when the template was learned, so a filled copy read through the slot can
+    # subtract it: whatever remains is what the patient added. Measured before this
+    # existed, 321 of 527 values that slots added to the benchmark were the form's own
+    # printing. ``None`` on templates learned before it existed.
+    printed_text: str | None = None
+    # Placed by a reviewer looking at a filled copy, not inferred from the blank. A taught
+    # slot outranks the page's own reading for its question; an inferred one only adds.
+    taught: bool = False
     required: bool = False
     expected_content: str = "printed_or_handwritten"
     normalizer: str | None = None
     review_threshold: float = Field(default=0.75, ge=0, le=1)
     options: list[str] = Field(default_factory=list)
     pattern: str | None = None
+
+
+class SlotCorrection(BaseModel):
+    """Where a reviewer says an answer lives on a form read through a template."""
+
+    page_index: int = Field(ge=0)
+    label: str
+    bbox: BoundingBox
+    value: str | None = None
 
 
 class TemplatePage(BaseModel):
@@ -93,7 +104,11 @@ class TemplatePage(BaseModel):
 
 class TemplateDefinition(BaseModel):
     schema_version: Literal["1.0"] = SCHEMA_VERSION
-    template_id: str = Field(pattern=r"^T\d{2}$")
+    # Two digits held fifty derived ids, T50-T99, and that was the whole capacity of the
+    # enrolled track: the 51st blank a clinic (or the benchmark) learned failed with "no
+    # derived template ids remain", which the benchmark runner read as "not derivable"
+    # for a day. A practice with more than fifty forms is not exotic.
+    template_id: str = Field(pattern=r"^T\d{2,4}$")
     template_name: str
     version: int = Field(ge=1)
     page_count: int = Field(gt=0)
@@ -125,62 +140,3 @@ class PreprocessingResult(BaseModel):
     perspective_corrected: bool = False
     quality: PageQuality
     artifacts: dict[str, str]
-
-
-class ExtractedField(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
-    field_id: str
-    label: str
-    field_type: FieldType
-    bbox: BoundingBox
-    raw_value: Any = None
-    normalized_value: Any = None
-    confidence: float = Field(ge=0, le=1)
-    source: ExtractionSource
-    needs_review: bool
-    validation_errors: list[ValidationError] = Field(default_factory=list)
-    alternatives: list[Any] = Field(default_factory=list)
-    score_components: dict[str, float] = Field(default_factory=dict)
-
-
-class ExtractedPage(BaseModel):
-    page_index: int
-    image_url: str
-    width: int
-    height: int
-    alignment_confidence: float = Field(ge=0, le=1)
-    fields: list[ExtractedField]
-
-
-class ExtractionSummary(BaseModel):
-    field_count: int
-    review_count: int
-    processing_ms: int
-
-
-class ExtractionRun(BaseModel):
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
-    run_id: str
-    sample_id: str | None = None
-    template_id: str | None = None
-    template_match_confidence: float = Field(ge=0, le=1)
-    status: str
-    pages: list[ExtractedPage]
-    summary: ExtractionSummary
-
-
-class EvaluationMetrics(BaseModel):
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
-    split: str
-    sample_count: int
-    field_count: int
-    overall_accuracy: float
-    printed_accuracy: float | None = None
-    handwritten_accuracy: float | None = None
-    checkbox_accuracy: float | None = None
-    signature_presence_accuracy: float | None = None
-    review_rate: float
-    error_capture_rate: float
-    by_template: dict[str, float] = Field(default_factory=dict)
-    by_field_type: dict[str, float] = Field(default_factory=dict)
-    failures: list[dict[str, Any]] = Field(default_factory=list)

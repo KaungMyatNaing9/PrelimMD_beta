@@ -2,7 +2,9 @@ import hashlib
 import itertools
 import re
 import time
+from collections import Counter
 from collections.abc import Sequence
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -28,11 +30,14 @@ from app.services.field_layout import (
 )
 from app.services.field_validity import plausible
 from app.services.fusion import fuse
+from app.services.relinker import available as relink_available
+from app.services.relinker import relink
 from app.services.templates import MATCH_THRESHOLD, registry
 from app.services.vision_extractor import available as vision_available
 from app.services.vision_extractor import extract as vision_extract
 from app.services.word_source import (
     MAX_LABEL_WORDS,
+    MIN_LEGIBLE,
     PdfMark,
     Word,
     group_lines_tolerant,
@@ -40,11 +45,14 @@ from app.services.word_source import (
     pdf_marks,
     words_from_image,
     words_from_pdf,
+    words_in_region,
 )
 
+# Section titles no clinic's form would ask a patient to answer. Generic words only: a
+# specific clinic's letterhead once sat here, left over from the synthetic corpus, and a
+# rule that names one form is a rule tuned to it.
 HEADINGS = {
     "patient intake form",
-    "prelimmd medical center",
     "demographics",
     "emergency contact",
     "insurance information",
@@ -98,7 +106,17 @@ def strip_instruction(text):
     return without if without.strip() else text
 
 
+# A run of rule glyphs is the form's writing line, not part of what was written on it.
+# PDF text layers hand a value over with its empty rule attached -- "__________ Guerrero"
+# -- and a reviewer was shown the rule as if the patient had typed it. Two or more, so a
+# single underscore inside an e-mail address survives.
+RULE_GLYPHS = re.compile(r"[_.\u2024\u2025\u2026]{2,}")
+
+
 def normalize(v, t):
+    if isinstance(v, str):
+        # Line by line, so a medication list keeps its line breaks.
+        v = "\n".join(" ".join(RULE_GLYPHS.sub(" ", line).split()) for line in v.split("\n"))
     if t == FieldType.DATE:
         months = {
             name: index
@@ -890,6 +908,20 @@ def _centre_inside_box(inner: Box, outer: Box) -> bool:
 _CAPTION_RULE = re.compile(r"[_.\u2024\u2025\u2026]{2,}")
 
 
+def _spans_several_blanks(raw) -> bool:
+    """Whether a reading runs across more than one writing line.
+
+    "__ Male __ Female" is a tick row drawn as rules, "Home ____ Cell ____" is a row of
+    captions with their blanks; in both, words sit *between* rule runs. Nobody's answer
+    does that. A rule at the start or the end -- "________ Gustafsson" from a PDF text
+    layer -- is one blank with its value and is left alone.
+    """
+    if not isinstance(raw, str):
+        return False
+    between = RULE_GLYPHS.split(raw)[1:-1]
+    return any(re.search(r"[A-Za-z0-9]", part) for part in between)
+
+
 def _is_a_caption(value: str) -> bool:
     """Whether a value is itself one of the captions this vocabulary recognises."""
     stripped = _CAPTION_RULE.sub(" ", value).strip(" .,-:/")
@@ -936,7 +968,10 @@ def _blank_furniture(fields: list[DetectedFormField]) -> None:
         if not isinstance(value, str) or not value.strip():
             continue
         if _is_letterhead(field.label_text) or (
-            _is_question_tail(value) or _is_option_glyphs(value) or _is_a_caption(value)
+            _is_question_tail(value)
+            or _is_option_glyphs(value)
+            or _is_a_caption(value)
+            or _spans_several_blanks(field.raw_value)
         ):
             field.raw_value = None
             field.normalized_value = None
@@ -1000,8 +1035,13 @@ def _best_layout(
         answered = [f for f in candidate if f.normalized_value not in (None, "", False)]
         return sum(1 for f in answered if _looks_answered(f)), len(answered)
 
-    fields = max((boxed, inline), key=reads)
-    layout = "boxed" if fields is boxed else "inline"
+    if settings.layout_choice == "assign":
+        leader = max((boxed, inline), key=reads)
+        fields = _assign_fields(boxed, inline, "boxed" if leader is boxed else "inline")
+        layout = "assigned"
+    else:
+        fields = max((boxed, inline), key=reads)
+        layout = "boxed" if fields is boxed else "inline"
     checkboxes = detect_checkboxes(page_image, words)
     claimed = _resolve_choice_fields(fields, checkboxes, words, gray, w, h, marks)
     # Rows of tick boxes no answer region covers are questions of their own.
@@ -1025,6 +1065,267 @@ SECTION_BAND_WIDTH = 0.30
 # what it caught is the printed text of the fields inside it. The same fraction guards
 # template derivation in ``template_builder``.
 MAX_ANSWER_AREA_FRACTION = 0.12
+
+
+# Both readers proposing the same value for the same caption is independent evidence: they
+# find captions by different means (drawn regions against colons and gaps), so agreement is
+# not one reader repeated.
+AGREEMENT_BONUS = 0.2
+# The reader that reads the page better as a whole is the more credible witness for any one
+# field on it. A prior, not the verdict: a clearly better edge from the other reader still
+# wins, and this only settles the close ones.
+WINNER_PRIOR = 0.1
+# A value that runs through a printed caption ("ME ZIPCODE 04101") has crossed into the next
+# field. Soft, because "Group Health Cooperative" is an insurer.
+CAPTION_CROSSING = 0.3
+# A person was born before they signed the form. Of the dates a page offers, the earliest is
+# the birth date and the latest is today's; a birth caption holding the latest, or a plain
+# date caption holding the earliest, has caught the other one's value. `Date` was the most
+# wrongly read caption on the benchmark (90 of 2,775 fields) for exactly this reason.
+DATE_ORDER = 0.15
+
+
+def _assign_fields(
+    boxed: list[DetectedFormField], inline: list[DetectedFormField], winner: str
+) -> list[DetectedFormField]:
+    """Choose fields from both readers one caption at a time, never a whole page at once.
+
+    ``_best_layout`` chose by counting answered fields, and a reader that mistakes captions
+    for answers answers *more*: on one page the boxed reader "filled" 21 fields to the
+    inline reader's 11, and the eleven were right. Volume is what a caption-binding reader
+    is best at, so a count rewards exactly the failure it was meant to judge, and the
+    choice flipped with the values written on the page.
+
+    Here both readers' proposals are pooled and taken best first under one rule: a run of
+    words on the page serves once. A caption place is answered by at most one proposal, a
+    value place answers at most one caption, and a run that is one proposal's caption
+    cannot be another's value -- the boxed reader on a stacked-cell form otherwise offers
+    "Portland" as the caption of the address below it while the inline reader offers it as
+    the answer to "City", and a matching that keeps captions and values in separate pools
+    accepted both. A reader can then only win a field by proposing a better edge for it,
+    never more edges.
+
+    The first attempt was a maximum-weight bipartite matching. It gained recall and lost
+    precision (58.1 -> 55.6 on LARGE): a sum objective takes two mediocre edges over one
+    good one, and every junk proposal that conflicts with nothing is added to the sum. Two
+    things fix that here. Furniture weighs nothing rather than a little, so it is never
+    emitted as a value. And the reader that read the page worse as a whole may contribute
+    only values, under captions the vocabulary knows: its unfamiliar captions are, on the
+    evidence of the page it lost, mostly not captions at all, and its blank proposals add
+    no value while their regions can hijack a row of tick boxes from the field that owns
+    it (measured: three `Race` rows lost to a blank captioned with an option's own text).
+
+    Weights are hand-set from what the readers are known to get wrong, never fitted: 112
+    forms are too few to learn weights without memorising them.
+    """
+    candidates = list(boxed) + list(inline)
+    from_winner = [(i < len(boxed)) == (winner == "boxed") for i in range(len(candidates))]
+    quality = [_quality(c) for c in candidates]
+    for i in range(len(boxed)):
+        for j in range(len(boxed), len(candidates)):
+            a, b = candidates[i], candidates[j]
+            if (
+                quality[i] > 0
+                and quality[j] > 0
+                and _same_place(a.label_bbox, b.label_bbox)
+                and _same_place(a.answer_bbox, b.answer_bbox)
+                and comparable(a.normalized_value) == comparable(b.normalized_value)
+            ):
+                quality[i] += AGREEMENT_BONUS
+                quality[j] += AGREEMENT_BONUS
+    for i in range(len(candidates)):
+        if quality[i] > 0 and from_winner[i]:
+            quality[i] += WINNER_PRIOR
+    dated = [
+        (i, when)
+        for i in range(len(candidates))
+        if quality[i] > 0
+        and _asks_a_date(candidates[i])
+        and (when := _as_date(candidates[i].normalized_value)) is not None
+    ]
+    distinct = {when for _, when in dated}
+    if len(distinct) >= 2:
+        earliest, latest = min(distinct), max(distinct)
+        for i, when in dated:
+            birth = _asks_a_birth_date(candidates[i])
+            if when == earliest:
+                quality[i] += DATE_ORDER if birth else -DATE_ORDER
+            elif when == latest:
+                quality[i] += -DATE_ORDER if birth else DATE_ORDER
+
+    def admissible(i: int) -> bool:
+        return from_winner[i] or bool(candidates[i].canonical_key)
+
+    def free(i: int, as_value: bool) -> bool:
+        # Same kind, same place: a caption place answered once, a value place used once.
+        # Across kinds the test is stricter -- the *same run of words* -- because a ruled
+        # row's answer region spans the page and merely contains the small captions
+        # printed beneath the rule for the row below it: on one form the phone row's
+        # region held the "CITY  STATE  ZIP CODE" captions, and the either-way test threw
+        # all three fields off the page.
+        c = candidates[i]
+        if any(_same_place(c.label_bbox, L) for L in taken_labels):
+            return False
+        if any(_same_run(c.label_bbox, V) for V in taken_values):
+            return False
+        if as_value and any(_same_place(c.answer_bbox, V) for V in taken_values):
+            return False
+        return not (as_value and any(_same_run(c.answer_bbox, L) for L in taken_labels))
+
+    taken_labels: list[BoundingBox] = []
+    taken_values: list[BoundingBox] = []
+    chosen: list[DetectedFormField] = []
+    order = sorted(
+        (i for i in range(len(candidates)) if quality[i] > 0),
+        key=lambda i: (quality[i], from_winner[i], i < len(boxed)),
+        reverse=True,
+    )
+    for i in order:
+        if admissible(i) and free(i, as_value=True):
+            chosen.append(candidates[i])
+            taken_labels.append(candidates[i].label_bbox)
+            taken_values.append(candidates[i].answer_bbox)
+    # A caption that won no value is still a field: the page asks a question there. The
+    # reader's own blank proposal where one exists, otherwise the losing proposal with its
+    # value cleared -- the value belongs to the caption that won it.
+    for i in sorted(range(len(candidates)), key=lambda i: i >= len(boxed)):
+        if not from_winner[i] or not free(i, as_value=False):
+            continue
+        field = candidates[i]
+        if _answered(field):
+            field = field.model_copy(
+                update={"raw_value": None, "normalized_value": None, "is_blank": True,
+                        "needs_review": True, "confidence": 0.6}
+            )
+        chosen.append(field)
+        taken_labels.append(field.label_bbox)
+    return sorted(chosen, key=lambda f: (f.label_bbox.y, f.label_bbox.x))
+
+
+def _quality(field: DetectedFormField) -> float:
+    """How much a proposed caption-value edge is worth, from the value's own shape.
+
+    Nothing here asks which reader made the proposal. The type test is soft -- a
+    plausibility of zero costs a quarter of the weight, not the edge -- because a hard
+    per-field validity filter was tried here before and gained nothing: a hard filter has
+    to be right every time, a cost can be outvoted by a better alternative. Furniture is
+    the exception and weighs nothing: a value that is the form's own printing is not a
+    worse answer, it is not an answer.
+    """
+    if not _answered(field) or _spans_several_blanks(field.raw_value):
+        return 0.0
+    value = field.normalized_value
+    if isinstance(value, str):
+        # A PDF text layer hands over the value with its empty rule attached --
+        # "__________ Eguchi" -- and the rule is furniture, the name is not. Judged raw,
+        # every ruled value on every PDF weighed nothing and the PDF half of the benchmark
+        # fell fourteen points. The rule is stripped for the judgement only; the value
+        # itself is left as the reader produced it.
+        value = _CAPTION_RULE.sub(" ", value).strip(" .,-:/")
+        if not value:
+            return 0.0
+        if (
+            match(value)[0] is not None
+            or _is_printed_caption(value)
+            or _is_question_tail(value)
+            or _is_option_glyphs(value)
+            or _is_glued_caption(value)
+        ):
+            return 0.0
+    label = field.label_text
+    if _is_letterhead(label) or sum(c.isalpha() for c in label) < 2:
+        return 0.0
+    # A heading, or a caption long enough to be an instruction, is not a question --
+    # unless the vocabulary recognises it. "Emergency Contact" is a section title that is
+    # also the caption of the contact's name on many forms, and "Please check the box(es)
+    # that describe your race" is eight words and a real field; both map, and zeroing
+    # them cost real names and real answers. Making the test soft for *every* caption
+    # instead re-admitted the unopposed junk it exists for (precision 67.8 -> 61.4).
+    if not field.canonical_key and (
+        norm(label) in HEADINGS or len(label.split()) > MAX_CAPTION_WORDS
+    ):
+        return 0.0
+    # A stray rule glyph is not the value's shape: "#_GRP24741" is a group number with one
+    # underscore that survived the rule stripping, and judged raw it was furniture.
+    judged = re.sub(r"[_|\[\]{}]", " ", value).strip() if isinstance(value, str) else value
+    credibility = plausible(judged, field.field_type)
+    if credibility < SUSPECT:
+        return 0.0
+    weight = 0.5 + 0.25 * credibility
+    if field.canonical_key:
+        weight += 0.15
+    weight += 0.1 * field.confidence
+    if isinstance(value, str) and _crosses_caption(value):
+        weight -= CAPTION_CROSSING
+    return max(weight, 0.0)
+
+
+_DATE_TEXT = re.compile(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})|(\d{4})-(\d{2})-(\d{2})")
+
+
+def _as_date(value) -> date | None:
+    """The calendar date a value states, if it states one. US order for slashed dates."""
+    if not isinstance(value, str):
+        return None
+    found = _DATE_TEXT.search(_CAPTION_RULE.sub(" ", value))
+    if not found:
+        return None
+    if found.group(4):
+        year, month, day = int(found.group(4)), int(found.group(5)), int(found.group(6))
+    else:
+        month, day, year = int(found.group(1)), int(found.group(2)), int(found.group(3))
+        if year < 100:
+            year += 2000 if year <= datetime.now(tz=UTC).year % 100 else 1900
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _asks_a_date(field: DetectedFormField) -> bool:
+    words = norm(field.label_text).split()
+    return "date" in words or "dob" in words or _asks_a_birth_date(field)
+
+
+def _asks_a_birth_date(field: DetectedFormField) -> bool:
+    label = norm(field.label_text)
+    return (
+        field.canonical_key == "patient.date_of_birth"
+        or "birth" in label
+        or "dob" in label.split()
+    )
+
+
+def _glued_captions() -> frozenset[str]:
+    """Known captions with their spaces removed: OCR reads "STREET ADDRESS" printed in a
+    tight cell as one token, and "streetaddress" is still the form talking."""
+    return frozenset(c.replace(" ", "") for c in known_captions())
+
+
+def _is_glued_caption(value: str) -> bool:
+    return norm(value).replace(" ", "") in _glued_captions()
+
+
+def _crosses_caption(value: str) -> bool:
+    """Whether a value runs through a multi-word caption and on past it.
+
+    "ME ZIPCODE 04101" is a state, then the next field's caption, then its value: the
+    reader's run crossed a field boundary. Single-word captions are not tested -- "Group
+    Health Cooperative" and "First Baptist Church" are real answers.
+    """
+    tokens = norm(value).split()
+    caps, glued = known_captions(), _glued_captions()
+    for i in range(len(tokens) - 1):
+        for j in range(i + 1, min(i + 4, len(tokens))):
+            run = tokens[i:j]
+            if (len(run) > 1 and " ".join(run) in caps) or (len(run) == 1 and run[0] in glued and run[0] not in caps):
+                return True
+    return False
+
+
+def comparable(value) -> str:
+    """Collapse the differences that are not disagreements: case, spacing, separators."""
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
 def _is_centred(box: Box, words: list[Word], page_width: float) -> bool:
@@ -1384,7 +1685,7 @@ class FormAnalyzer:
                 processing_time_ms=int((time.monotonic() - started) * 1000),
             )
 
-        matched, match_score = _match_template(folder, template_hint)
+        matched, matched_page, match_score = _match_template(folder, template_hint)
         fields: list[DetectedFormField] = []
         pages = []
         warnings = list(page.warnings)
@@ -1398,15 +1699,27 @@ class FormAnalyzer:
                 source.marks,
             )
             # A layout already understood is read through what was learned about it, not
-            # worked out again from scratch. Both readings are scored and the better one
-            # wins outright, the same way boxed and inline compete: a template learned
-            # from a bad first copy must not permanently outrank what the page itself
-            # says. Only page 1 has a learned layout -- templates are single-page.
-            if matched and index == 0:
+            # worked out again from scratch. The page's own reading leads and the template
+            # adds to it (see ``_merge_template``). Every page: a template carries a page
+            # per page of the packet it was learned from, and a filled copy keeps the
+            # packet's page order.
+            if matched:
+                # The upload's first page matched template page ``matched_page``; a
+                # photograph of a packet's page 3 is read through page 3's slots.
                 guided = _read_with_template(
-                    matched, source.words, source.width, source.height, index
+                    matched,
+                    source.words,
+                    source.width,
+                    source.height,
+                    matched_page + index,
+                    source.image,
+                    source.source,
                 )
                 if guided:
+                    # The same furniture rules the page's reading has already been
+                    # through: a slot's box catches the caption printed inside it just
+                    # as a detected box does, and "INSURED NAME" is not a phone number.
+                    _blank_furniture(guided)
                     read, layout = _merge_template(guided, read), "template"
             # Field ids are only unique within the page that produced them.
             for field in read:
@@ -1415,6 +1728,19 @@ class FormAnalyzer:
             # Optional second reader. Off unless a vision provider is configured, so the
             # shipped behaviour is unchanged and turning it off is one environment
             # variable rather than a revert.
+            # Captions the page prints that no reader answered are put to a local text
+            # model with the page's lines and their positions; only answers it can ground
+            # to an exact line survive, and only if they pass the readers' own quality
+            # test. Off unless RELINK_PROVIDER is set.
+            if relink_available():
+                questions = _unanswered_captions(read, source.words)
+                if questions:
+                    try:
+                        found = relink(source.words, source.width, source.height, questions)
+                    except Exception as exc:  # noqa: BLE001 - a model must never take the page down
+                        warnings.append(f"Re-linker unavailable: {type(exc).__name__}")
+                    else:
+                        read = _adopt_relinked(read, found, source.width, source.height)
             if vision_available():
                 try:
                     read = fuse(
@@ -1445,6 +1771,7 @@ class FormAnalyzer:
                     "layout": layout,
                     "boxes_detected": boxes_detected,
                     "template_match_confidence": round(match_score, 3),
+                    "template_page": matched_page + index if matched else None,
                     "width": source.width,
                     "height": source.height,
                     **source.stats,
@@ -1464,7 +1791,9 @@ class FormAnalyzer:
         )
 
 
-def geometric_fields(page_image: Path) -> list[DetectedFormField]:
+def geometric_fields(
+    page_image: Path, widgets: list[Box] | None = None, words: list[Word] | None = None
+) -> list[DetectedFormField]:
     """Every region the form provides for an answer, bound to its label.
 
     A template describes *where a form gives you space to write*, which is the geometric
@@ -1473,15 +1802,31 @@ def geometric_fields(page_image: Path) -> list[DetectedFormField]:
     on them and their fields carry ``source="ocr"`` -- deriving a template from those
     would record where text happened to sit on one filled copy, not where the blank form
     provides space, and regeneration would place values wherever that one patient wrote.
+
+    ``widgets`` are answer spaces the form's designer drew (see ``widget_boxes``), in the
+    page's pixels. They are exact where morphology on a render is an inference, so they
+    come first, and a detected region that is a widget's own border or the rule beneath
+    it is the same space seen twice and is dropped. Morphology still supplies whatever the
+    designer did not draw: widgets for the demographics and printed rules for the rest is
+    an ordinary form.
     """
     from PIL import Image
 
-    words = words_from_image(page_image, settings.ocr_language)
+    if words is None:
+        words = words_from_image(page_image, settings.ocr_language)
     w, h = Image.open(page_image).size
     boxes = detect_boxes(page_image)
     rules = detect_write_rules(page_image, boxes)
     rule_indices = set(range(len(boxes), len(boxes) + len(rules)))
     boxes += rules
+    if widgets:
+        kept = [
+            (i, b)
+            for i, b in enumerate(boxes)
+            if not any(_centre_inside_box(b, wd) or _centre_inside_box(wd, b) for wd in widgets)
+        ]
+        rule_indices = {len(widgets) + n for n, (i, _) in enumerate(kept) if i in rule_indices}
+        boxes = list(widgets) + [b for _, b in kept]
     contents, free = partition(boxes, words)
     gray = cv2.imread(str(page_image), cv2.IMREAD_GRAYSCALE)
     fields, _ = _build_box_fields(
@@ -1497,6 +1842,33 @@ def geometric_fields(page_image: Path) -> list[DetectedFormField]:
     return fields
 
 
+def widget_boxes(pdf: Path, index: int) -> list[Box]:
+    """Answer spaces the form's designer drew, in the rendered page's pixels.
+
+    A clinic that publishes a fillable PDF has already said where every value belongs:
+    each text widget is exactly the region a template is otherwise left to infer from the
+    pixels of a render. Twenty-three of the first 86 benchmark forms are such PDFs. Only
+    text widgets are taken; tick boxes are read from ink by the choice stage whichever way
+    they were drawn.
+    """
+    try:
+        page = fitz.open(pdf)[index]
+    except (RuntimeError, ValueError, IndexError):
+        return []
+    return [
+        Box(
+            widget.rect.x0 * PDF_RENDER_SCALE,
+            widget.rect.y0 * PDF_RENDER_SCALE,
+            widget.rect.x1 * PDF_RENDER_SCALE,
+            widget.rect.y1 * PDF_RENDER_SCALE,
+        )
+        for widget in page.widgets()
+        if widget.field_type_string == "Text"
+        and widget.rect.width > 0
+        and widget.rect.height > 0
+    ]
+
+
 def _image_url(analysis_id: str, index: int = 0) -> str:
     return f"/api/v1/form-analyses/{analysis_id}/pages/{index}/image"
 
@@ -1504,47 +1876,110 @@ def _image_url(analysis_id: str, index: int = 0) -> str:
 def _merge_template(
     guided: list[DetectedFormField], adhoc: list[DetectedFormField]
 ) -> list[DetectedFormField]:
-    """A learned template leads; whatever it left empty is filled from the page.
+    """The page's own reading leads; a learned template may only add to it.
 
-    Choosing between the two by *counting* values does not work, and picking the larger
-    count is how the learned reading kept losing: the ad-hoc pass finds more entries but
-    they include an empty phone bracket read as "( )", while the template holds the one
-    field that a model had to be asked about. Count is not quality.
+    The rule used to run the other way: the template was authoritative for every slot it
+    had answered, and the page's reading contributed only fields outside those slots.
+    Measured on all 85 LARGE blanks (2026-09-13) that read *worse* than no template at
+    all -- 64.9% -> 61.1% on the 100 artefacts with their own template, 14 -> 1 on one
+    PDF. A slot that read *something* is not a slot that read the right thing: a box
+    drawn a little off catches the neighbouring caption, and "answered" then silently
+    replaced a correct free-form value with a wrong one. Whether a slot answered
+    *correctly* cannot be known here, so the only rule that cannot lose is the additive
+    one. Everything the page read stands, and a slot is appended only where it brings
+    something the page did not: a value where the page read none, or a field where the
+    page found none. A reading that only adds cannot score below the reading it adds to,
+    which is the floor enrolment had lost.
 
-    So the template is authoritative for the fields it knows -- that is what learning it
-    was for -- and the ad-hoc reading contributes only fields the template has no slot
-    for, so nothing the page says is thrown away either. A template learned badly is
-    corrected in review, which is where a human already looks.
+    "Something the page did not" is judged by *question* as well as by place. Measured
+    with the place test alone (2026-09-14): a slot captioned "Date of Birth" whose box
+    caught "STREET," was appended beside the page's correct birth date read under "DOB",
+    and "Zip Code" holding "State ______ LA Zip ____" beside the page's correct zip under
+    "Zip" -- four artefacts lost fields to a rule that was meant to be unable to lose.
+    A slot answering a question the page already answered, by canonical key or by the
+    caption's wording, adds nothing but a second, worse answer.
+
+    The page's fields come first in the result on purpose: downstream consumers that keep
+    the first value per label (the scorer, and a reviewer reading top-down) then see the
+    page's reading before the template's.
     """
-    kept = list(guided)
-    for field in adhoc:
-        if field.normalized_value in (None, "", False):
+    # A slot a reviewer placed is the exception to "the page leads". Measured with every
+    # slot additive (2026-09-14, second fill set): 350 of 363 wrong values sat on captions
+    # the template had been taught, the page's own misreading standing in front of the
+    # reviewer's slot. A taught slot that read something displaces the page's fields at
+    # its place and on its question, and comes first so a same-key field elsewhere on the
+    # page cannot shadow it. Slots inferred from the blank still only add.
+    # When a taught slot and the page disagree, containment decides. A page reading that
+    # is a strict part of the slot's ("TN" against "TN 37421", "2986 Lantern Hill Road"
+    # against "... Road Apt/Trailer") means the slot's region reached into the next
+    # field, and the tighter reading wins; measured unconditionally, the override broke
+    # 224 fields, 159 of them exactly this. Otherwise the reviewer's slot wins, and every
+    # page field at its place or on its question goes with it.
+    taught = [s for s in guided if s.source == "reviewer" and _answered(s)]
+    leading: list[DetectedFormField] = []
+    for slot in taught:
+        rivals = [
+            f
+            for f in adhoc
+            if _same_place(slot.answer_bbox, f.answer_bbox)
+            or (f.canonical_key is not None and f.canonical_key == slot.canonical_key)
+            or norm(f.label_text) == norm(slot.label_text)
+        ]
+        if any(_answered(f) and _strictly_within(f, slot) for f in rivals):
             continue
-        a = field.answer_bbox
-        centre = (a.x + a.width / 2, a.y + a.height / 2)
-        # A slot only outranks the page where it actually read something. Blocking on the
-        # slot's *existence* meant an empty slot silently discarded a correct ad-hoc value
-        # sitting inside it, which is how enrolment lost three of TEST2's fields while
-        # gaining six of TEST4's.
-        answered_slot = any(
-            s.answer_bbox.x <= centre[0] <= s.answer_bbox.x + s.answer_bbox.width
-            and s.answer_bbox.y <= centre[1] <= s.answer_bbox.y + s.answer_bbox.height
-            and s.normalized_value not in (None, "", False)
-            for s in guided
-        )
-        if not answered_slot:
-            kept.append(field)
+        leading.append(slot)
+        adhoc = [f for f in adhoc if f not in rivals]
+    guided = [s for s in guided if s not in taught]
+    kept = list(leading) + list(adhoc)
+    asked = {f.canonical_key for f in kept if _answered(f) and f.canonical_key}
+    asked |= {norm(f.label_text) for f in kept if _answered(f)}
+    for slot in guided:
+        overlapping = [f for f in kept if _same_place(slot.answer_bbox, f.answer_bbox)]
+        if any(_answered(f) for f in overlapping):
+            continue
+        if overlapping and not _answered(slot):
+            continue
+        if _answered(slot) and (slot.canonical_key in asked or norm(slot.label_text) in asked):
+            continue
+        kept.append(slot)
     return kept
 
 
-def _reads(fields: list[DetectedFormField]) -> tuple[int, int]:
-    """How well a reading did: values that landed on a known field, then values at all."""
-    answered = [f for f in fields if f.normalized_value not in (None, "", False)]
-    return sum(1 for f in answered if f.canonical_key), len(answered)
+def _answered(field: DetectedFormField) -> bool:
+    return field.normalized_value not in (None, "", False)
+
+
+def _strictly_within(inner: DetectedFormField, outer: DetectedFormField) -> bool:
+    """Whether one reading is a proper part of the other, ignoring case and separators."""
+    a, b = comparable(inner.normalized_value), comparable(outer.normalized_value)
+    return bool(a) and a != b and a in b
+
+
+def _same_run(a: BoundingBox, b: BoundingBox) -> bool:
+    """Whether two regions are the same run of words: each holds the other's centre."""
+    return _inside(a, b) and _inside(b, a)
+
+
+def _inside(inner: BoundingBox, outer: BoundingBox) -> bool:
+    cx, cy = inner.x + inner.width / 2, inner.y + inner.height / 2
+    return outer.x <= cx <= outer.x + outer.width and outer.y <= cy <= outer.y + outer.height
+
+
+def _same_place(a: BoundingBox, b: BoundingBox) -> bool:
+    """Whether two answer regions are the same place on the page: either one's centre
+    lies inside the other. A template slot is tight; an inline reading's region can span
+    the whole row, so containment has to be tested both ways."""
+    return _inside(a, b) or _inside(b, a)
 
 
 def _read_with_template(
-    template_id: str, words: list[Word], w: float, h: float, page_index: int
+    template_id: str,
+    words: list[Word],
+    w: float,
+    h: float,
+    page_index: int,
+    image: Path | None = None,
+    source: str = "",
 ) -> list[DetectedFormField]:
     """Read a page through a layout that has already been understood once.
 
@@ -1559,12 +1994,16 @@ def _read_with_template(
     relative to the master is not handled here -- ``templates.align_to_template`` computes
     the homography that would be needed, and this deliberately does not reach for it until
     there is a scanned form to test it against.
+
+    The slots come from the template page with this page's index. Packets keep their page
+    order between the blank and a filled copy, so the registration page of a packet that
+    opens with a letter is read through the letter's template page, not the letter's.
     """
     try:
         definition = registry.get(template_id)
     except KeyError:
         return []
-    slots = definition.pages[0].fields if definition.pages else []
+    slots = next((p.fields for p in definition.pages if p.page_index == page_index), [])
     fields = []
     for index, slot in enumerate(slots):
         box = slot.bbox
@@ -1575,6 +2014,23 @@ def _read_with_template(
             and box.y <= ((word.y0 + word.y1) / 2) / h <= box.y + box.height
             and word.text.strip()
         ]
+        # The blank said what this region prints; what the filled copy adds is the answer.
+        inside = _without_printed(inside, slot.printed_text)
+        if source == "ocr" and image is not None:
+            # A photograph's slot is read again on its own, enlarged: the page-level OCR
+            # of a 150dpi render turned "12/26/2006" into "42/26/2006", and the enlarged
+            # crop does not. The reading that Tesseract is surer of wins; an empty page
+            # reading yields to the crop only when the crop is legible.
+            region = words_in_region(
+                image,
+                (box.x * w, box.y * h, (box.x + box.width) * w, (box.y + box.height) * h),
+                settings.ocr_language,
+            )
+            region = _without_printed(region, slot.printed_text)
+            if region and _mean_confidence(region) >= (
+                _mean_confidence(inside) if inside else MIN_LEGIBLE
+            ):
+                inside = region
         answer = strip_instruction(
             " ".join(
                 " ".join(z.text for z in row) for row in group_lines_tolerant(inside)
@@ -1597,7 +2053,7 @@ def _read_with_template(
                 required_status=RequiredStatus.UNKNOWN,
                 required_confidence=0.3,
                 detection_confidence=0.9,
-                source="template",
+                source="reviewer" if slot.taught else "template",
                 canonical_key=mapped.canonical_key if mapped else slot.field_id,
                 mapping_confidence=score,
                 mapping_reason=reason,
@@ -1611,15 +2067,110 @@ def _read_with_template(
     return fields
 
 
-def _match_template(folder: Path, hint: str | None) -> tuple[str | None, float]:
-    """Identify the blank master this page came from, so its values can later be
-    regenerated onto the template's own exact field coordinates."""
+def _without_printed(words: list[Word], printed: str | None) -> list[Word]:
+    """Drop the words a slot's blank form printed inside it, token for token.
+
+    Matched on normalised tokens with multiplicity, so a caption's word is removed once
+    per printing and a value that merely repeats one of its words keeps the extra. Tokens
+    that normalise to nothing (a rule, a stray bracket) are dropped too: they were never
+    an answer, whichever page they came from.
+    """
+    remaining: Counter[str] = Counter(norm(printed).split()) if printed else Counter()
+    kept = []
+    for word in words:
+        # OCR glues a caption, its rule and the value into one token ("Name_Analise");
+        # the underscore is the seam. Each piece is judged on its own.
+        pieces = [piece for piece in word.text.split("_") if piece] if "_" in word.text else [word.text]
+        surviving = []
+        for piece in pieces:
+            token = norm(piece)
+            if not token:
+                continue
+            if remaining[token] > 0:
+                remaining[token] -= 1
+                continue
+            surviving.append(piece)
+        if surviving:
+            kept.append(word if surviving == [word.text] else word._replace(text=" ".join(surviving)))
+    return kept
+
+
+def _unanswered_captions(fields: list[DetectedFormField], words: list[Word]) -> list[str]:
+    """Captions the vocabulary knows, printed on this page, that no field answered.
+
+    Longest first: "date of birth" before "date", so a page's specific questions are the
+    ones asked when the list is capped."""
+    answered = {f.canonical_key for f in fields if _answered(f) and f.canonical_key}
+    lines = [" " + norm(" ".join(z.text for z in row)) + " " for row in group_lines_tolerant(words)]
+    printed: set[str] = set()
+    for caption in known_captions():
+        if len(caption) < 3 or not any(f" {caption} " in line for line in lines):
+            continue
+        mapped, _, _ = match(caption)
+        if mapped and mapped.canonical_key not in answered:
+            printed.add(caption)
+    return sorted(printed, key=lambda c: (-len(c), c))
+
+
+def _adopt_relinked(
+    fields: list[DetectedFormField],
+    found: dict[str, tuple[str, list[Word]]],
+    w: float,
+    h: float,
+) -> list[DetectedFormField]:
+    """Add the model's grounded answers as fields, under the readers' own rules.
+
+    A span some field already answers is not taken twice; a value that would weigh nothing
+    as a reader's proposal (furniture, a caption, an implausible shape) is not added; a
+    blank field for the same question gives way. Every adopted value is flagged for review:
+    a model linked it, a person should glance at it."""
+    kept = list(fields)
+    for index, (caption, (value, carrying)) in enumerate(found.items()):
+        region = box(carrying, w, h)
+        if any(_answered(f) and _same_place(f.answer_bbox, region) for f in kept):
+            continue
+        mapped, score, reason = match(caption)
+        typ = mapped.value_type if mapped else FieldType.SHORT_TEXT
+        candidate = DetectedFormField(
+            field_id=f"relink_{index}",
+            page_index=0,
+            label_text=caption,
+            normalized_label=norm(caption),
+            field_type=typ,
+            label_bbox=region,
+            answer_bbox=region,
+            required_status=RequiredStatus.UNKNOWN,
+            required_confidence=0.3,
+            detection_confidence=0.7,
+            source="relink",
+            canonical_key=mapped.canonical_key if mapped else None,
+            mapping_confidence=score,
+            mapping_reason=reason,
+            raw_value=value,
+            normalized_value=normalize(value, typ),
+            is_blank=False,
+            confidence=_mean_confidence(carrying),
+            needs_review=True,
+        )
+        if _quality(candidate) <= 0:
+            continue
+        kept = [
+            f for f in kept
+            if _answered(f) or f.canonical_key is None or f.canonical_key != candidate.canonical_key
+        ]
+        kept.append(candidate)
+    return kept
+
+
+def _match_template(folder: Path, hint: str | None) -> tuple[str | None, int, float]:
+    """Identify the blank master this page came from, and which of its pages, so its
+    values can later be regenerated onto the template's own exact field coordinates."""
     colour = cv2.imread(str(folder / "normalized_color.png"))
     if colour is None:
-        return None, 0.0
+        return None, 0, 0.0
     try:
-        definition, score = registry.match(colour, hint)
+        definition, page, score = registry.match_page(colour, hint)
     except RuntimeError:
-        return None, 0.0
+        return None, 0, 0.0
     matched = definition.template_id if definition and score >= MATCH_THRESHOLD else None
-    return matched, score
+    return matched, page, score
