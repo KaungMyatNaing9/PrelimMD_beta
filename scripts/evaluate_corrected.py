@@ -49,7 +49,10 @@ def _region(rect: fitz.Rect, page: fitz.Page) -> dict:
     then outranked the page's correct "TN". A reviewer drawing the region would stop at
     the caption; so does this."""
     w, h = page.rect.width, page.rect.height
-    x0 = max(0.0, rect.x0 / w - 0.005)
+    # A wider left margin than before: the next patient writes a few pixels further left
+    # and a region starting inside the first glyph read "Ingrid" as "rid". Less reach
+    # above and below: a tall region caught the line beneath a one-line answer.
+    x0 = max(0.0, rect.x0 / w - 0.015)
     x1 = min(0.98, rect.x1 / w + max(0.12, 1.5 * rect.width / w))
     beside = [
         word
@@ -59,8 +62,8 @@ def _region(rect: fitz.Rect, page: fitz.Page) -> dict:
     ]
     if beside:
         x1 = min(x1, max(rect.x1 / w + 0.01, min(word[0] for word in beside) / w - 0.005))
-    y0 = max(0.0, rect.y0 / h - 0.3 * rect.height / h)
-    y1 = min(0.995, rect.y1 / h + 0.3 * rect.height / h)
+    y0 = max(0.0, rect.y0 / h - 0.2 * rect.height / h)
+    y1 = min(0.995, rect.y1 / h + 0.2 * rect.height / h)
     return {"x": round(x0, 4), "y": round(y0, 4), "width": round(x1 - x0, 4),
             "height": round(y1 - y0, 4)}
 

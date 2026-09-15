@@ -2613,3 +2613,17 @@ Five read-side rules measured overnight, five reverted. The taught-slot read is 
 optimum with rules of this kind; what remains on the second fill set is OCR quality on
 photographs and a few forms whose photograph OCR is poor throughout. The loop turns to
 teaching-side placement and to the hybrid.
+6. **Teaching-side placement**: the taught region starts 0.015 of the page width before
+   the value (was 0.005) and reaches 0.2 of the value's height above and below (was 0.3).
+   Re-taught into a new snapshot; measuring.
+   **Kept, marginal**: 85.1 / 70.8 against 85.0 / 70.6 -- PDFs +1.1, photographs −1.1,
+   28 artefacts up and 28 down. The wider left margin is what helped; the tighter vertical
+   reach is what cost the photographs, and splitting the two would take another hour of
+   re-teaching for half a point. Left as is.
+
+**Overnight tally.** Six changes measured on the second fill set; one kept. The corrected
+track ends the night at **85.1% / 70.8%**, the enrolled arm at 68.8 / 67.9, zero-shot at
+64.6 / 68.9. The rules that were reverted are recorded above so nobody retries them
+without a new reason. The hybrid pass continues from its cache; whatever fraction of the
+112 forms it has read by morning is in `artifacts/hybrid_large_zero_shot.txt` once the
+scorer exits, and its per-artefact dumps are readable before that.
