@@ -2662,3 +2662,154 @@ when the scorer exits, and on the artefacts done so far it reads photographs 6.7
 better than geometry alone. The measurement servers were stopped except the vision one on
 port 8011; the UI backend on port 8000 runs the final commit; the frontend dev server on
 port 3000 is still up.
+
+## 2026-09-15 (afternoon) — Reading slots with the vision model, and what the losses were made of
+
+The user asked for 90 on the corrected track (85.4 / 70.7 that morning). The remaining
+loss on the second fill set, by shape: photographs 81 unrelated readings, 56 misses, 51
+supersets, 43 fragments; PDFs 56 misses, 53 unrelated, 31 supersets, 31 fragments. Most
+of the photograph loss is OCR misreading inside a taught slot ("akag aWwa" for Nakagawa,
+"rid" for Ingrid), which no rule fixes; a reader that sees the glyphs does.
+
+### A vision call costs the same whatever it looks at
+
+The plan was to have `qwen2.5vl:7b` read each taught slot's crop: a few dozen image
+tokens where a page is thousands. Measured, it is not so: Ollama resizes every image to
+about 1,100 tokens, and a 200x40 crop took 24 s, the same as a page. One photograph with
+thirteen slots took 660 s. So the slots of a page are read together: every taught slot is
+cut out, enlarged so one line of the page's text stands 64 px tall (a region several
+lines tall keeps that scale, capped at four lines), and stacked with its number on a
+sheet 1,100 px wide and at most 1,150 tall; the model answers `<number>: <text>` per
+strip, EMPTY where nothing is written (`vision_extractor.transcribe_strips`,
+`SLOT_VISION=ollama`, cached by the sheet's bytes with the sheet image kept beside the
+answer so a wrong reading can be looked at). Two or three sheets a page at 40-50 s each
+because the benchmark's taught regions are three lines tall (the fill's widget boxes),
+so a photograph costs about two minutes; a reviewer's drawn slot is one line.
+
+Only taught slots are on the sheet: slots the blank's own geometry suggested are boxes,
+rules and headings, and they made two of the first three sheets.
+
+### What the model's reading is allowed to do
+
+The model corrects, it does not overrule. Empty OCR takes the model's reading only when
+it is a credible value of the slot's type and not a caption; a non-empty OCR reading is
+replaced only when the two agree on at least half their characters
+(`TRANSCRIBE_AGREEMENT`), so "12/26/2006" corrects "42/26/2006" and "Nakagawa" corrects
+"akag aWwa", and an unrelated line is never adopted. The furniture rules run after it as
+before. On the two probe photographs the model read every taught slot right that OCR had
+read wrong (Nakagawa, Ingrid, 9790 Peregrine Street, Savannah, GA, 31405, the e-mail,
+Vietnamese, Married, Black/African American; Somali, QA Engineer, Manchester, NH).
+
+### Three rules the probe exposed, none of them about the model
+
+1. **Whole-word containment.** The taught-slot tie-break let a page reading that is a
+   strict part of the slot's win ("TN" over "TN 37421"). "rid" is a strict part of
+   "Ingrid" too, so the page's misread beat the slot's correct reading. `_strictly_within`
+   now compares whole words: a piece of a word is a misread, not a tighter reading.
+2. **Printing subtracted on the footprint it was recorded on.** A slot's printing is
+   learned a hair beyond the region, so the caption beside it is in it ("Pharmacy:"); at
+   read time it was subtracted from the region's words alone, where the only "Pharmacy"
+   is the answer's, and "Lakeshore Pharmacy" read "Lakeshore" -- 46 fields, plus "Street"
+   from addresses, "Group" from employers, "Latino" from ethnicities. The words in the
+   margin ring now take their tokens first (`_printed_left`).
+3. **Captions cut off both ends.** A taught slot starts a little before its value, so the
+   caption's tail is in the crop, cut at the crop's edge on a photograph: "ity Spokane",
+   "S caspian@example.com", "Name Analise", "T Ravensworth". A reading that runs on
+   carries the next caption: "Savannah, State: 31405", "Adeyemi SS". Leading tokens go
+   while they end the slot's caption or a word the blank prints there; the reading stops
+   at a later token ending in a colon or beginning a printed word (`_without_captions`,
+   applied to OCR and model readings alike).
+
+Not fixable by the reader: twenty birth dates read as the form's date. The fill wrote
+the date of birth into comb boxes as single digits and the year is not in the text
+layer at all ("1 0 / 1 0 /" then "02/22/2026"); the truth cannot be read from the page.
+
+### Measured, corrected track on the second fill set (fast loop, taught templates reused)
+
+| arm | recall | precision | PDF | photographs |
+|---|---|---|---|---|
+| baseline, morning | 85.4% | 70.7% | 89.2 | 80.9 |
+| whole-word containment alone | 85.5 | 70.6 | 89.3 | 80.8 |
+| all three rules (no model) | **87.1%** | **70.5%** | 89.7 | **84.0** |
+| sheet reader (model on), with the first rule only | **88.5%** | **71.8%** | 89.6 | **87.1** |
+| fairer oracle alone (fresh teach, three-rule code) | 86.6 | 70.3 | 89.9 | 82.5 |
+| **model + every rule above + form date + run end** (cached sheets, same templates) | **92.1%** | **72.0%** | **92.9** | **91.1** |
+| form date + run end, no model, on the fairer oracle's templates (against 86.6 on the same templates) | 89.6 | 70.7 | 92.9 | 85.6 |
+| model, strip-border fixes as first written (part-of-OCR rule, full stop as fragment) | 91.2 | 71.9 | 92.4 | 89.8 |
+
+**Zero-shot did not pay for any of it.** The reader change (one-word captions) and the
+vocabulary key touch every track, so the zero-shot geometry bench was re-run on the day's
+code: **64.6 → 67.1 recall at 68.9 precision either way** (+77 / −6 fields, PDFs +3.4,
+photographs +1.5). `make bench` figures from here are 67.1 / 68.9.
+
+The border fixes as first written cost 25 fields against 92.1 (+12 / −37): keeping OCR's
+reading whenever the model's is a part of it blocked the model's correction of a caption
+fragment in front of the value ("ress, Fresno", "Person Zephyr Beauchamp"), which is the
+common case, to save "Anselm Ashworth" twice; and the fragment rule counted "Dr." as a
+caption's tail, so twelve physicians lost their title. Both reverted; the glued-letter
+split ("yPortland", "eCT", "p04101") stays, and is re-measured from the cache.
+
+The sheet reader's arm ran on the code of 11:48 (whole-word containment and the
+label-only caption cut, before the printing ring and the printed-word cuts), so its
+number is not additive with the three-rule arm's; the combination is measured next from
+the cached sheets. On its own it is +102 / −17 fields, photographs +6.2 at +2.5
+precision, one minute a photograph. The seventeen were of two kinds, both in the reading's
+edges rather than the model: the caption's last letter glued to the value with nothing
+between ("yPortland", "eCT", "p04101", "e) Male"), now split off where the case turns
+when the letter ends a caption; and a model reading that is a part of OCR's ("Anselm" for
+"Anselm Ashworth", "1/20/2000" with the first digit outside the slot), which replaced it
+because the two agree on most characters -- the strip is cut at the slot's edges while
+OCR's crop reaches beyond them, so the reading that has the whole of the other now keeps
+it.
+
+**92.1 / 72.0 is the first corrected-track figure past 90** (17:12): +198 / −12 fields
+against the morning's 85.4, PDFs 92.9, photographs 91.1, one corrected fill per form
+teaching each template, scored on the second fill set. The model's sheets were replayed
+from cache, so the run cost OCR time only (about 35 minutes with two other arms sharing
+the machine).
+
+The fairer oracle went the other way: 87.1 → 86.6 on the same code. It teaches 1,339
+slots where the substring oracle taught 1,489, and the 150 it declines include values the
+patient wrote on top of the printed option ("Male" over the blank's own "Male"), where
+the slot read correctly once the printing was subtracted. Declining a hit because the
+blank prints the same text there is right only when another hit exists; the oracle now
+prefers whole, unprinted hits and falls back to what it has (values of four characters
+or more only, so "PA" is still never taught from inside "Partner"). Re-taught as B4 below.
+
+Two more mechanisms found in the three-rule arm's remaining 357 failures, both general:
+
+4. **A bare "Date" is not the birth date.** 81 of the 357 were a birth date read as the
+   form's date or the reverse. `match("Date")` returned `patient.date_of_birth` on token
+   similarity at exactly the 0.5 bar (one token of two shared with "Birth Date"), so the
+   two taught slots were rivals by canonical key in the merge -- each displaced the
+   other's page reading -- and the scorer, falling back to the key, read one for the
+   other. The form's date is now a vocabulary entry of its own (`form.date`: "Date",
+   "Today's Date", "Date Signed", "Signature Date").
+5. **A one-word caption inside a value.** `_value_run_end` cut a value at any
+   capitalised word that is an exact alias: "Lakeshore **Pharmacy**", "Third **Street**
+   Drug", "Halcyon Dental **Group**" -- 46 fields, most of the "cut short" class. One
+   word now names the next field only when a change of case or a gap wider than a word
+   space marks it off from the answer it follows; captions of two words or more cut as
+   before ("Race Black/African American **Preferred Language** English").
+
+The whole-word rule alone is a wash (+3 / −3 fields): it wins where the page read a
+fragment ("555 0171" for a phone, "S" for Single) and loses where the slot's region is
+wrong and the page's char-level fragment was the better reading ("Pemberton" inside the
+e-mail the substring oracle had taught as the surname's place). The three together take
+53 fields and give back 5; the printing ring and the caption cuts are where the gain is,
+almost all on photographs. One of the five is a spacing case ("GRP 75930" against "...
+GRP75930"), so the containment test now accepts a run of whole words with any spacing.
+
+### An unseen set, locked (17:25)
+
+The user asked for twenty more forms and for them to be "truly unseen ... locked so that
+they are not trained on". Twenty-one blanks were collected from public clinic sites whose
+hosts are not in LARGE (dental, paediatric, physical therapy, eye care, gastroenterology,
+university health, demographic sheets), checked for a text layer and against every known
+blank by hash, and filled twice: `data/real-forms/UNSEEN/` (patient A, 408 truth fields)
+and `UNSEEN_B/` (patient B, 415), 40 artefacts each. The folder's README, `CLAUDE.md` and
+the working memory carry the lock: score it, quote totals only through
+`scripts/unseen_summary.py`, never open a form, a page image, a dump or a FAIL line.
+Nothing in the reader has seen them; nothing will be tuned against them. Measured on
+port 8015 with the day's code, zero-shot first and then the corrected track (teach on A,
+score on B, model on); numbers below when they land.

@@ -29,6 +29,21 @@ FIELDS = [
         FieldType.DATE,
         ["Date of Birth", "DOB", "Birth Date", "Birthdate"],
     ),
+    # The date the form was filled: every intake packet asks for it beside the signature,
+    # and a bare "Date" is never the birth date. Without its own key, "Date" matched
+    # "Birth Date" on token similarity at exactly the 0.5 bar, the two slots displaced
+    # each other in the merge, and each was scored as the other -- 81 fields on the
+    # second fill set (2026-09-15), the largest single loss on the corrected track.
+    (
+        "form.date",
+        "Date completed",
+        "administrative",
+        FieldType.DATE,
+        ["Date", "Today's Date", "Date Signed", "Date of Signature", "Signature Date"],
+        False,
+        "never_inherit",
+        "optional",
+    ),
     (
         "patient.phone",
         "Phone",

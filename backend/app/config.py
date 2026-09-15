@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # with every answer grounded to an exact line of the page or discarded. "disabled" or
     # "ollama" (qwen2.5:7b-instruct, Apache-2.0, pulled locally). Off until measured.
     relink_provider: str = "disabled"
+    # The local vision model reads each template slot's crop on a photograph, correcting
+    # what OCR misread there. "disabled" or "ollama". Seconds per slot, not minutes per
+    # page, because the geometry says where to look.
+    slot_vision: str = "disabled"
     relink_model: str = ""
     relink_timeout_seconds: int = Field(default=120, ge=5, le=600)
 

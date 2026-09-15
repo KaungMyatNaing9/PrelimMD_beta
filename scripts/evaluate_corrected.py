@@ -88,13 +88,57 @@ def _nearest_to_caption(hits: list[fitz.Rect], captions: list[fitz.Rect]) -> fit
     return min(hits, key=distance)
 
 
+def _whole_word(hit: fitz.Rect, page: fitz.Page, value: str) -> bool:
+    """Whether the words under a hit read as the value and nothing more: "PA" inside
+    "Partner" and "Zephyr" inside the e-mail are not places a reviewer would put a slot."""
+    under = [
+        w for w in page.get_text("words")
+        if fitz.Rect(w[:4]).intersects(hit)
+        and min(w[3], hit.y1) - max(w[1], hit.y0) > 0.5 * (w[3] - w[1])
+    ]
+    text = " ".join(w[4] for w in sorted(under, key=lambda w: w[0]))
+    return comparable(text) == comparable(value)
+
+
+def _printed_there(hit: fitz.Rect, blank: fitz.Page | None, value: str) -> bool:
+    """Whether the blank prints the same text in the same place -- the option label
+    "Male" beside the box, as against the "Male" the patient wrote."""
+    if blank is None:
+        return False
+    return any(
+        printed.intersects(hit) and (printed & hit).get_area() > 0.5 * hit.get_area()
+        for printed in blank.search_for(value)
+    )
+
+
+def _where_written(page: fitz.Page, blank: fitz.Page | None, value: str) -> list[fitz.Rect]:
+    """The places a reviewer might put the slot for a value, best kind first.
+
+    Whole words the blank does not print are what a reviewer points at. Measured with
+    only those allowed (2026-09-15), 150 of 1,489 slots went untaught and the set read
+    worse: a patient who writes "Male" on top of the printed "Male" has still written it
+    there, and the slot read it once the printing was subtracted. So the stricter kinds
+    are preferred, not required -- except that a value shorter than four characters is
+    never taught from inside another word, which is how a state got taught "Partner"."""
+    hits = page.search_for(str(value))
+    whole = [h for h in hits if _whole_word(h, page, value)]
+    if not whole and len(comparable(value)) < 4:
+        return []
+    pool = whole or hits
+    unprinted = [h for h in pool if not _printed_there(h, blank, value)]
+    return unprinted or pool
+
+
 def oracle_corrections(fill: Path, truth: dict[str, str]) -> list[dict]:
     doc = fitz.open(fill)
+    blank_path = fill.with_name(fill.name.replace("_FILLED", ""))
+    blank = fitz.open(blank_path) if blank_path != fill and blank_path.exists() else None
     out = []
     for label, value in truth.items():
         for index in range(min(doc.page_count, MAX_PAGES)):
             page = doc[index]
-            hits = page.search_for(str(value))
+            printed_page = blank[index] if blank is not None and index < blank.page_count else None
+            hits = _where_written(page, printed_page, str(value))
             if hits:
                 hit = _nearest_to_caption(hits, page.search_for(label))
                 out.append({"page_index": index, "label": label, "value": str(value),

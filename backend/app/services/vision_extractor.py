@@ -23,10 +23,12 @@ import re
 import time
 import urllib.error
 import urllib.request
+from io import BytesIO
 from pathlib import Path
 from typing import NamedTuple
 
 from fastapi import HTTPException
+from PIL import Image, ImageDraw, ImageFont
 
 from app.config import settings
 from app.services.word_source import Word
@@ -888,3 +890,130 @@ def locate_by_label(
             (bottom - top) / page_h,
         )
     return boxes
+
+
+TRANSCRIBE_PROMPT = (
+    "This image stacks {n} numbered strips cut from one filled-in medical form; each strip "
+    "is one field. For every strip, transcribe exactly what a person wrote or typed in it, "
+    "character for character, including digits and punctuation. Ignore printed labels, "
+    "box outlines and rule lines. Answer with exactly {n} lines, one per strip, in the "
+    "form `<number>: <text>`, and write `<number>: EMPTY` where nothing was written."
+)
+# One image costs the local model the same whatever its size -- Ollama resizes every
+# image to about 1,100 tokens, measured 24 s for a 200x40 crop and for a full page alike
+# -- so a page's slots are read together, as strips on one sheet, not one call each.
+# A strip is enlarged so one line of the page's text stands STRIP_HEIGHT tall; a region
+# several lines tall keeps that scale, so its writing stays as legible as a single line's.
+STRIP_HEIGHT = 64
+STRIP_MAX_HEIGHT = 4 * STRIP_HEIGHT
+SHEET_WIDTH = 1100
+SHEET_HEIGHT = 1150
+SHEET_GUTTER = 72
+STRIP_GAP = 10
+_STRIP_LINE = re.compile(r"^\s*[`*]*\s*(\d+)\s*[:.)\-\u2013]\s*[`*]*\s*(.*?)\s*[`*]*\s*$")
+
+
+def slot_vision_available() -> bool:
+    return settings.slot_vision == "ollama" and _ollama_reachable()
+
+
+def transcribe_strips(
+    image: Path, regions: list[tuple[float, float, float, float]], line_height: float
+) -> list[str]:
+    """What the local vision model reads in each region of a page image.
+
+    Every region is cut out, enlarged so a line of the page's text is one height, and
+    stacked with its number on a sheet; the model transcribes each sheet line by line.
+    The geometry already says where each answer lives, so the model is asked only to
+    read, never to find. Cached by the sheet's bytes, the prompt and the model, so a
+    measurement replays and a re-upload of the same photograph costs nothing. A region
+    the model did not answer reads as "".
+    """
+    page = Image.open(image).convert("RGB")
+    strips = [_strip(page, region, line_height) for region in regions]
+    out: list[str] = [""] * len(regions)
+    first = 0
+    while first < len(strips):
+        last, height = first, STRIP_GAP
+        while last < len(strips) and (last == first or height + strips[last].height + STRIP_GAP <= SHEET_HEIGHT):
+            height += strips[last].height + STRIP_GAP
+            last += 1
+        batch = strips[first:last]
+        for offset, text in _read_sheet(_sheet(batch), len(batch)).items():
+            if 0 <= offset < len(batch):
+                out[first + offset] = text
+        first = last
+    return out
+
+
+def _strip(page: Image.Image, region: tuple[float, float, float, float], line_height: float) -> Image.Image:
+    x0, y0, x1, y1 = region
+    left, top = max(0, int(x0)), max(0, int(y0))
+    right, bottom = min(page.width, int(x1) + 1), min(page.height, int(y1) + 1)
+    if right - left < 4 or bottom - top < 4:
+        return Image.new("RGB", (4, STRIP_HEIGHT), "white")
+    crop = page.crop((left, top, right, bottom))
+    factor = STRIP_HEIGHT / max(line_height, 1.0, min(crop.height, line_height))
+    factor = min(factor, (SHEET_WIDTH - SHEET_GUTTER) / crop.width, STRIP_MAX_HEIGHT / crop.height)
+    factor = max(factor, 0.25)
+    return crop.resize((max(4, int(crop.width * factor)), max(4, int(crop.height * factor))), Image.LANCZOS)
+
+
+def _sheet(strips: list[Image.Image]) -> bytes:
+    height = STRIP_GAP + sum(strip.height + STRIP_GAP for strip in strips)
+    sheet = Image.new("RGB", (SHEET_WIDTH, height), "white")
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default(size=30)
+    top = STRIP_GAP
+    for index, strip in enumerate(strips):
+        draw.text((8, top + max(0, (strip.height - 30) // 2)), f"{index + 1}:", fill="black", font=font)
+        sheet.paste(strip, (SHEET_GUTTER, top))
+        rule = top + strip.height + STRIP_GAP // 2
+        draw.line([(0, rule), (SHEET_WIDTH, rule)], fill=(160, 160, 160), width=2)
+        top += strip.height + STRIP_GAP
+    buffer = BytesIO()
+    sheet.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _read_sheet(sheet: bytes, count: int) -> dict[int, str]:
+    prompt = TRANSCRIBE_PROMPT.format(n=count)
+    model = settings.vision_model or DEFAULT_OLLAMA_MODEL
+    key = hashlib.sha256(sheet + prompt.encode() + model.encode()).hexdigest()
+    cached = CACHE_DIR / f"sheet-{key}.txt"
+    if CACHE and cached.exists():
+        return _parse_strips(cached.read_text())
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt, "images": [base64.b64encode(sheet).decode()]}
+        ],
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": 40 * count + 64},
+    }
+    request = urllib.request.Request(
+        OLLAMA_URL, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=settings.vision_timeout_seconds) as r:
+        text = str(json.loads(r.read())["message"]["content"])
+    if CACHE:
+        # The sheet is kept beside the answer so a measurement can show what the model
+        # was looking at when it read a strip wrong.
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cached.with_suffix(".png").write_bytes(sheet)
+        cached.write_text(text)
+    return _parse_strips(text)
+
+
+def _parse_strips(text: str) -> dict[int, str]:
+    """``{strip offset: transcription}`` from the model's numbered lines; EMPTY is ""."""
+    found: dict[int, str] = {}
+    for line in text.splitlines():
+        m = _STRIP_LINE.match(line)
+        if not m:
+            continue
+        number, value = int(m.group(1)), " ".join(m.group(2).split())
+        if number < 1 or number - 1 in found:
+            continue
+        found[number - 1] = "" if value.upper().strip("`*. ") == "EMPTY" else value
+    return found
