@@ -69,3 +69,12 @@ def test_an_option_picked_off_a_tick_row_is_not_an_answer():
     assert not _is_choice_row("MARITAL STATUS Married", "Married")
     assert not _is_choice_row("Rafferty O Vandermeer", "Rafferty O Vandermeer")
     assert not _is_choice_row("Date of Birth 08/04/1945", "08/04/1945")
+
+
+def test_a_letter_page_is_not_worth_a_model_call():
+    from app.services.form_analyzer import _worth_a_model_call
+
+    letter = _line(100, "Thank", "you", "for", "choosing", "our", "practice")
+    assert not _worth_a_model_call([], letter)
+    captioned = _line(100, "Date", "of", "Birth:") + _line(120, "City", "State", "Zip")
+    assert _worth_a_model_call([], captioned)

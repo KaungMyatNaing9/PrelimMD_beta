@@ -2631,3 +2631,8 @@ scorer exits, and its per-artefact dumps are readable before that.
    0.05; a tie no longer goes to the crop): **kept**. 85.1 / 70.8 → **85.4 / 70.7**,
    eleven artefacts up and one down, photographs +1.0. The night's corrected-track figure
    is 85.4 / 70.7 on the second fill set.
+8. **Vision only where a page asks a question** (`_worth_a_model_call`: geometry found a
+   field, or the page prints a caption the vocabulary knows): **kept**. Identical numbers
+   on the cached sample (62.0 / 67.3, no artefact changed) with 45 model calls instead of
+   58. Welcome letters and policies no longer cost minutes each; the full hybrid pass runs
+   with it from here.
