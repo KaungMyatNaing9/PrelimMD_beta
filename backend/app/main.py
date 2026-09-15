@@ -6,6 +6,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.schemas.form_understanding import Attestation, FieldRevision
@@ -84,7 +85,7 @@ async def create_form_analysis(
     analysis_id, folder = new_run_dir()
     source, kind = await save_upload(pages[0], folder)
     if kind != "pdf":
-        preprocess(source, kind, folder)
+        await run_in_threadpool(preprocess, source, kind, folder)
         for index, extra in enumerate(pages[1:], start=1):
             if index >= settings.max_pdf_pages:
                 break
@@ -93,8 +94,10 @@ async def create_form_analysis(
                 raise HTTPException(
                     422, "Pages sent together must all be images; send a PDF on its own"
                 )
-            preprocess(more, more_kind, folder, index)
-    analysis = FormAnalyzer().analyze(analysis_id, folder, template_id)
+            await run_in_threadpool(preprocess, more, more_kind, folder, index)
+    # Off the event loop: reading a page is seconds of OCR, and on the loop it held every
+    # other request -- the health check included -- and serialised concurrent uploads.
+    analysis = await run_in_threadpool(FormAnalyzer().analyze, analysis_id, folder, template_id)
     (folder / "analysis.json").write_text(analysis.model_dump_json(indent=2))
     from app.services.history import patient_key
 

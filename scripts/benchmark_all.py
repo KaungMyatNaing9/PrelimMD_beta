@@ -73,7 +73,10 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--keep", default=None,
                         help="directory to keep every benchmark's full output in")
+    parser.add_argument("--parallel", type=int, default=4,
+                        help="artefacts scored at once; identical results, a third of the time")
     args = parser.parse_args()
+    workers = ["--parallel", str(args.parallel)] if args.parallel > 1 else []
     global KEEP
     if args.keep:
         KEEP = Path(args.keep)
@@ -86,18 +89,18 @@ def main() -> int:
     rows: list[tuple[str, str, str]] = []
 
     print("dev forms (regression check only -- tuned against, not evidence)", flush=True)
-    rows.append(("dev forms", find(run("evaluate_real_forms.py", "--api", args.api),
+    rows.append(("dev forms", find(run("evaluate_real_forms.py", "--api", args.api, *workers),
                                    r"ACCURACY .*= ([\d.]+%)"), "recall"))
     for name in ("TEST2", "TEST4", "TEST5"):
         print(f"{name} recall", flush=True)
         rows.append((f"{name} zero-shot",
                      find(run("evaluate_real_forms.py", "--api", args.api,
-                              "--truth", f"{name}/ground_truth_new.json"),
+                              "--truth", f"{name}/ground_truth_new.json", *workers),
                           r"ACCURACY .*= ([\d.]+%)"), "recall"))
 
     print("LARGE zero-shot (the benchmark, ~10 minutes)", flush=True)
     large = run("evaluate_real_forms.py", "--api", args.api,
-                "--truth", "LARGE/ground_truth_new.json")
+                "--truth", "LARGE/ground_truth_new.json", *workers)
     rows.append(("LARGE zero-shot", find(large, r"ACCURACY .*= ([\d.]+%)"), "recall"))
     rows.append(("LARGE precision", find(large, r"PRECISION .*= ([\d.]+%)"), "precision"))
 
@@ -108,7 +111,7 @@ def main() -> int:
     if not args.quick:
         print("LARGE enrolled (learn every blank, read through it, release; ~45 minutes)",
               flush=True)
-        enrolled = run("evaluate_enrolled.py", "--api", args.api, "--set", "LARGE")
+        enrolled = run("evaluate_enrolled.py", "--api", args.api, "--set", "LARGE", *workers)
         rows.append(("LARGE enrolled", find(enrolled, r"ACCURACY .*= ([\d.]+%)"), "recall"))
         rows.append(("LARGE enrolled prec.", find(enrolled, r"PRECISION .*= ([\d.]+%)"),
                      "precision"))

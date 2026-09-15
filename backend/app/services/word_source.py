@@ -265,6 +265,11 @@ def _words_from_tesseract(image_path: Path, language: str) -> list[Word]:
 # times before reading it is what turns "42/26/2006" back into a date. Only slots learned
 # for a template are read this way, so the cost is a few small OCR calls per photograph.
 REGION_SCALE = 3
+# Margin around the slot before it is read, as a fraction of the slot's height. A wide
+# margin was measured and reverted (2026-09-15): 1.5 heights to the left pulled in the
+# caption printed beside the slot, which the blank's recorded printing -- learned with a
+# narrower margin -- did not cover, and the second fill set lost 2.2 recall and 4.7
+# precision. The crop and the recorded printing have to agree on their reach.
 REGION_MARGIN = 0.15
 
 

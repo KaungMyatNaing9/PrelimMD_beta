@@ -2496,3 +2496,120 @@ own `DERIVED_TEMPLATES_DIR`.
 Measured on a server with its own `DERIVED_TEMPLATES_DIR`; registry identical before and
 after every arm. Nothing is committed. The user's UI backend on port 8000 runs this build;
 the frontend dev server on port 3000 was started for the browser test and left running.
+
+## 2026-09-15 — Photographs that never matched, and a second reader for slots
+
+Committed the day's work first (three commits on `nathan`, nothing pushed), then went
+after the remaining loss on the corrected track. The dumps showed the largest single
+cause: **30 of the 111 photographs never matched their own template** (scores 0.05-0.5
+against the 0.5 threshold), so no correction could reach them and they were read
+zero-shot -- about an eighth of every field on the set. The mechanism is scale: a master
+is rendered at 1,224 px across and a photograph arrives at 1,275, and that four percent
+halves ORB's geometric agreement. Scored offline against their proper page, all thirty
+match once both images are brought to one width (1,200 px) and ORB is given 2,000
+features (`MATCH_WIDTH`, `MATCH_FEATURES`; every score 0.72-1.0).
+
+Second: RapidOCR (ONNX PaddleOCR models) is installed and reads an enlarged slot crop
+better than Tesseract -- "01/26/1958" at 0.98 where Tesseract read "ic 01/26/1958 SEX
+ASSIGNE" at 0.48. It loses on whole pages because it returns lines, not words; inside a
+slot the slot is the geometry, so its lines are split into words by their share of the
+line and the printed-text subtraction works as before. `REGION_OCR_ENGINE=rapidocr` by
+default, falling back to Tesseract when it is not installed. Both measured below.
+
+### Measured together, then split
+
+One run with both changes, corrected arm on the second set: 84.5 / 70.7 → 83.5 / 68.6,
+photographs 79.7 → 77.6. Split by whether a photograph had matched before the fix: the
+newly matched ones (14) gained 13 fields, the previously matched ones (45) lost 40 -- and
+their only change was RapidOCR reading their slots. Its confidence sits near 0.98 for
+everything, so its crop reading always outranked the page's, wrong or not. Matching at one
+width stays (102 of 105 photographs match, from 81 of 111); RapidOCR goes back to opt-in
+(`REGION_OCR_ENGINE=rapidocr`) until the arbitration is something other than confidence.
+
+### Faster measurement, same numbers
+
+The user asked for the loop to move faster without measuring less. Three changes, none
+of which touch what is measured:
+
+- The upload endpoint was `async` and called the analyser on the event loop, so every
+  upload waited for the previous one and the health check hung during an analysis. The
+  analyser and the preprocessing now run in the thread pool. Four scoring workers
+  (`evaluate_real_forms.py --parallel 4`, the default in `benchmark_all.py`) score the
+  ten-form sample in 48 s where one took 82 s, with per-artefact lines identical -- and
+  that on a machine also running two other measurements.
+- Enrolling and teaching the 112 blanks costs half an hour a run and yields the same
+  templates whenever only the reading side changed. `evaluate_corrected.py --snapshot DIR
+  --templates-dir DIR` keeps the taught templates after one run and reuses them from a
+  fresh backend the next time, so a read-side change is scored in ten minutes.
+- A ten-form sample (`LARGE/ground_truth_sample10.json`) answers "is this worth a full
+  run" in a minute; the full set decides.
+
+### The hybrid, measured on the main forms at last
+
+`VISION_PROVIDER=ollama` (qwen2.5vl:7b, local) had never been measured on LARGE -- gate
+G2 in `PATH_TO_90.md` had sat at "next" since 2026-09-13. Ten-form sample (20 artefacts,
+258 fields), `VISION_CACHE=1`, its own template folder:
+
+| | recall | precision |
+|---|---|---|
+| geometry only | 56.6% | 64.1% |
+| geometry + re-linker (L3) | 61.2% | 63.3% |
+| **geometry + vision** | **62.0%** | **67.3%** |
+
+Photographs +12 recall on the artefacts scored first, no artefact worse. The cost is the
+same finding as for L3: about two and a half minutes a page on this machine, so the full
+set is an eighteen-hour run. It is the strongest zero-shot lever measured on these forms,
+and it is already the shipped default outside benchmarks (`vision_provider = "ollama"`);
+every quoted figure is geometry-only by protocol, and that protocol under-reports what the
+product does on a photograph by about that much.
+
+### Overnight loop (user asleep; "keep improving for eight hours")
+
+Each step below is one change, measured on the second fill set through the fast loop
+(taught templates reused from the snapshot, four scoring workers), kept if it wins on
+recall without losing precision, reverted otherwise. Baseline for the loop: the corrected
+arm at **85.0 / 70.6** (photographs matched, Tesseract slot reads).
+
+1. **Wider crop margins** (1.5 slot heights to the left, 0.5 to the right): **reverted**.
+   82.8 / 65.9 -- the crop pulled in the caption printed beside the slot, which the blank's
+   recorded printing, learned with a narrower margin, did not cover. 41 artefacts worse.
+   The crop and the recorded printing must agree on their reach.
+2. **Wide-gap cut inside a slot** (a line's value stops at the grouper's own wide-gap
+   split; "Savannah GA" becomes "Savannah"): measuring.
+   **Reverted**: 84.8 / 70.5, two artefacts lost six fields and none gained. A date typed
+   into boxed cells, "04 / 17 / 1986", is a value with wide gaps inside it.
+3. **RapidOCR as a second opinion**, asked only when Tesseract's confidence on a crop is
+   below the legibility line (`REGION_OCR_ENGINE=tesseract+rapidocr`): measuring.
+   **Reverted, and removed**: 84.9 / 69.1, 18 artefacts worse against 9 better. Asked
+   only where Tesseract was unsure, RapidOCR still overruled more right readings than it
+   fixed. Both RapidOCR crop paths are out of the code; the probe that promised them read
+   one crop, and one crop is not a measurement.
+4. **First line only for one-line questions** (a region drawn a little tall caught the
+   e-mail written under a name; multi-line types keep every line): measuring.
+   **Reverted**: 85.0 / 70.2, eleven fields gained and eleven lost, precision −0.4. A
+   region drawn tall catches the line below about as often as a value's second line is
+   the value.
+5. **A crop reading that is a strict part of the page's reading loses** ("rid" inside
+   "Ingrid" is the page's word cut at the crop's edge, not a surer reading): measuring.
+
+### `make bench` on the overnight build (photographs matching at one width)
+
+| benchmark | result | previous |
+|---|---|---|
+| LARGE zero-shot | 64.6% / 68.9% | same |
+| LARGE enrolled, blank only | **68.8% / 67.9%** | 68.5% / 67.9% |
+| LARGE_B, one corrected fill | **85.0% / 70.6%** | 84.5% / 70.7% |
+| dev / TEST2 / TEST4 / TEST5 | 100 / 72.5 / 52.4 / 55.2 | same |
+| FUNSD / placement / round-trip | 17.1% / 78.9% / 65.2% | same |
+
+Scored with four workers on a server with its own template folder; registry identical
+before and after. The hybrid pass over all 112 forms runs in the background from its cache
+whenever the machine is free; its output lands in `artifacts/hybrid_large_zero_shot.txt`.
+   **Reverted**: 84.5 / 70.6, eleven artefacts worse against two better. When the crop's
+   reading is a strict part of the page's, the page's is usually "Name Analise" -- the
+   caption glued on -- and the crop was right.
+
+Five read-side rules measured overnight, five reverted. The taught-slot read is at a local
+optimum with rules of this kind; what remains on the second fill set is OCR quality on
+photographs and a few forms whose photograph OCR is poor throughout. The loop turns to
+teaching-side placement and to the hybrid.
