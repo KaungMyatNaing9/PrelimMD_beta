@@ -2636,3 +2636,29 @@ scorer exits, and its per-artefact dumps are readable before that.
    on the cached sample (62.0 / 67.3, no artefact changed) with 45 model calls instead of
    58. Welcome letters and policies no longer cost minutes each; the full hybrid pass runs
    with it from here.
+
+### Morning summary, 2026-09-15
+
+Overnight, on the user's instruction to keep improving for eight hours:
+
+| track, on the 112 forms | recall | precision |
+|---|---|---|
+| zero-shot, geometry only (`make bench`) | 64.6% | 68.9% |
+| zero-shot, hybrid (vision on), first 79 of 222 artefacts, same artefacts geometry-only in brackets | **70.7%** (67.4) | 70.2 (69.5) |
+| enrolled from the blank | 68.8% | 67.9% |
+| one reviewer-corrected fill per form, scored on a second fill | **85.4%** | **70.7%** |
+
+Kept overnight: photographs match their template at one width (30 of 111 had never
+matched); a confidence margin before a crop reading replaces the page's; a wider left
+margin for taught regions; the vision model called only on pages that ask a question; the
+analyser off the event loop, four scoring workers and taught-template snapshots, which
+turned a 65-minute measurement into 15. Reverted after measuring: wider crop margins, a
+wide-gap cut, RapidOCR as sole reader and as second opinion, first-line-only, a crop-cut
+rule. Four commits on `nathan`, nothing pushed; tree clean; smoke test green.
+
+The hybrid pass over all 112 forms continues in the background from its cache (about two
+minutes a page even with the gate); its summary lands in `artifacts/hybrid_large_zero_shot.txt`
+when the scorer exits, and on the artefacts done so far it reads photographs 6.7 points
+better than geometry alone. The measurement servers were stopped except the vision one on
+port 8011; the UI backend on port 8000 runs the final commit; the frontend dev server on
+port 3000 is still up.
