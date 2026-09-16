@@ -2737,6 +2737,7 @@ layer at all ("1 0 / 1 0 /" then "02/22/2026"); the truth cannot be read from th
 | form date + run end, no model, on the fairer oracle's templates (against 86.6 on the same templates) | 89.6 | 70.7 | 92.9 | 85.6 |
 | model, strip-border fixes as first written (part-of-OCR rule, full stop as fragment) | 91.2 | 71.9 | 92.4 | 89.8 |
 | **model, glued-letter split only (commit 8ba3fbc)** | **92.5%** | **72.0%** | 92.9 | **92.1** |
+| softened oracle (B4: whole unprinted hits preferred, 1,477 of 1,501 taught), committed code, **no model** | **90.8%** | 70.7% | 93.7 | 87.3 |
 
 **Zero-shot did not pay for any of it.** The reader change (one-word captions) and the
 vocabulary key touch every track, so the zero-shot geometry bench was re-run on the day's
@@ -2777,7 +2778,9 @@ patient wrote on top of the printed option ("Male" over the blank's own "Male"),
 the slot read correctly once the printing was subtracted. Declining a hit because the
 blank prints the same text there is right only when another hit exists; the oracle now
 prefers whole, unprinted hits and falls back to what it has (values of four characters
-or more only, so "PA" is still never taught from inside "Partner"). Re-taught as B4 below.
+or more only, so "PA" is still never taught from inside "Partner"). Re-taught as B4: 89.6 → 90.8 on the same code without the model (+49 / −14 fields), so
+**the corrected track is past 90 with no model at all** once the benchmark's teaching step
+places slots the way a reviewer would; the model's arm on these templates follows.
 
 Two more mechanisms found in the three-rule arm's remaining 357 failures, both general:
 
