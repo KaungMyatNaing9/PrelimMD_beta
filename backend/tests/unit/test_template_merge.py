@@ -382,3 +382,38 @@ class TestTranscriptionParts:
         assert _without_captions("e) Male", "Gender", None) == "Male"
         assert _without_captions("u:Son", "Relation to you", None) == "Son"
         assert _without_captions("eBay", "Employer", None) == "eBay"
+
+
+class TestBlankPrinting:
+    def test_an_option_list_the_blank_prints_is_not_an_answer(self):
+        from collections import Counter
+
+        from app.services.form_analyzer import _is_printing
+
+        printed = Counter({"male": 1, "female": 1})
+        assert _is_printing("Male Female", Counter({"male": 1, "female": 1}), printed)
+        assert _is_printing("Interpreter Needed? Yes / No", Counter(["interpreter", "needed", "yes", "no"]), Counter(["interpreter", "needed", "yes", "no"]))
+
+    def test_a_word_written_over_its_own_printing_is_an_answer(self):
+        from collections import Counter
+
+        from app.services.form_analyzer import _is_printing
+
+        assert not _is_printing("Male", Counter({"male": 2, "female": 1}), Counter({"male": 1, "female": 1}))
+
+    def test_a_patients_words_are_never_printing(self):
+        from collections import Counter
+
+        from app.services.form_analyzer import _is_printing
+
+        assert not _is_printing("Analise", Counter({"first": 1, "name": 1, "analise": 1}), Counter({"first": 1, "name": 1}))
+        assert not _is_printing("TX", Counter({"tx": 1}), Counter())
+        assert not _is_printing("Savannah Name", Counter({"savannah": 1, "name": 1}), Counter({"name": 1}))
+
+    def test_ocr_misreadings_of_printing_are_still_printing(self):
+        from collections import Counter
+
+        from app.services.form_analyzer import _is_printing
+
+        assert _is_printing("OMale Female", Counter({"omale": 1, "female": 1}), Counter({"male": 1, "female": 1}))
+        assert _is_printing("J Home !4J Cell", Counter({"j": 1, "home": 1, "4j": 1, "cell": 1}), Counter({"home": 1, "cell": 1, "work": 1}))

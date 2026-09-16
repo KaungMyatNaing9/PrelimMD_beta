@@ -93,6 +93,12 @@ class TemplatePage(BaseModel):
     canonical_width: int = Field(gt=0)
     canonical_height: int = Field(gt=0)
     fields: list[TemplateField]
+    # Every word the blank prints on this page, as (normalised text, centre x, centre y)
+    # in page fractions. A value the page's readers propose that is nothing but this
+    # printing, at the place it is printed, is the form's furniture, not an answer: 548
+    # of 731 junk values on the benchmark's corrected track were exactly that
+    # (2026-09-16). Empty on templates learned before it existed.
+    printed_words: list[tuple[str, float, float]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def unique_fields(self):

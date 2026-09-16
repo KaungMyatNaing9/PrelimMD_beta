@@ -3001,3 +3001,39 @@ Complete, one series. The frozen system on forms nobody tuned against: **93.3 / 
 with the blank registered and one corrected copy per form**, 89.9 / 69.3 with no blank
 at all, 57.4 / 66.9 with nothing set up, and the page-level model is worth +16 recall
 only where nothing is set up, at −16 precision.
+
+## 2026-09-16 (evening) — Precision: the blank's printing is not an answer
+
+The user asked for precision above 90. On the corrected track (ported backend, fresh
+teach, no model) it stood at 78.8% with recall 91.2%. A census of the 731 proposed values
+that were no answer at all, checked against each form's blank: **548 were the blank's own
+printing read back at the place it is printed** -- option lists ("Male Female", "Single
+Married Widowed Divorced"), instructions ("Interpreter Needed? Yes / No", "Circle one"),
+sub-captions ("of Policyholder") -- 394 on PDFs and 154 on photographs. The rest: 145 OCR
+garbage on photographs (mostly untaught template slots and reviewer slots misreading a
+real value), 22 patient text under the wrong reading, a handful of cuts.
+
+**Mechanism.** A template now records every word its blank prints, with its position
+(`TemplatePage.printed_words`, from the text layer for a PDF blank, OCR otherwise). After
+a page is read through its template, any value a reader proposed is cleared when it is
+nothing but that printing at that place (`_blank_printing`): every word of it printed
+within the value's region on the blank, OCR misreadings of a printed word accepted at 0.8
+similarity, one- and two-letter tick-box noise ignored, and never where the page carries
+more of a word than the blank prints there -- a patient who writes "Male" over the printed
+option has still answered. A reviewer's taught slot is exempt. Values are blanked, fields
+kept.
+
+**Measured.** Replayed offline on the dump first (exact variant 90.6, fuzzy 91.5, fuzzy
+including template slots 93.4, adding reviewer slots 93.5 -- left out), then through the
+server on the same taught templates with the printed layer backfilled from each blank's
+text layer, as derivation now records it:
+
+| corrected track, LARGE_B, no model | recall | precision | PDF precision | photo precision |
+|---|---|---|---|---|
+| before | 91.2% | 78.8% | 78.3 | 79.5 |
+| **blank's printing cleared** | **91.2%** | **93.0%** | **97.9** | **87.7** |
+
+No artefact lost a correct field. It needs no model and no reviewer: it applies wherever a
+page matched a template learned from a blank, so the registered-only tier gains too.
+Templates learned before this change carry no printed layer and need re-enrolment to
+benefit. The locked unseen set is being re-measured with it.

@@ -1737,6 +1737,15 @@ class FormAnalyzer:
                     # as a detected box does, and "INSURED NAME" is not a phone number.
                     _blank_furniture(guided)
                     read, layout = _merge_template(guided, read), "template"
+                # The blank says what the form prints; a proposed value that is only
+                # that printing, where it is printed, is furniture however it was read.
+                _blank_printing(
+                    read,
+                    _printed_layer(matched, matched_page + index),
+                    source.words,
+                    source.width,
+                    source.height,
+                )
             # Field ids are only unique within the page that produced them.
             for field in read:
                 field.page_index = index
@@ -2303,6 +2312,110 @@ def _printed_left(
                 remaining[token] -= 1
     left = " ".join(remaining.elements())
     return left or None
+
+
+def _printed_layer(template_id: str, page_index: int) -> list[tuple[str, float, float]]:
+    """The printed words a template recorded for one page of its blank; [] if none."""
+    try:
+        definition = registry.get(template_id)
+    except KeyError:
+        return []
+    page = next((p for p in definition.pages if p.page_index == page_index), None)
+    return list(page.printed_words) if page else []
+
+
+# How far around a proposed value's region the printing and the page's own words are
+# gathered, in page fractions: the same footprint a slot's printed text is recorded on.
+PRINTING_MARGIN_X = PRINTED_MARGIN
+PRINTING_MARGIN_Y = PRINTED_MARGIN / 2
+# The least share of a value's characters the blank's printing must account for before
+# the value is called printing. The rest may only be OCR's reading of a tick box or a
+# bracket -- a token of one or two letters -- never a word of its own.
+PRINTING_SHARE = 0.5
+# How alike an OCR token and a printed word must be to be the same word misread:
+# "omale" for "male", "hispaniclatinx" for "hispaniclatino".
+PRINTING_SIMILARITY = 0.8
+
+
+def _blank_printing(
+    fields: list[DetectedFormField],
+    layer: list[tuple[str, float, float]],
+    words: list[Word],
+    w: float,
+    h: float,
+) -> None:
+    """Clear values that are the blank form's own printing, where the blank prints them.
+
+    An answer is what a filled copy adds to its blank. The readers cannot always tell
+    the two apart -- "Male Female" beside "Sex", "Interpreter Needed? Yes / No", a
+    clinic's own "Rev 12/09/21" -- but the template learned from the blank can: those
+    words are printed exactly there on every copy. Measured on the benchmark's corrected
+    track (2026-09-16), 548 of 731 values that were no answer at all were this.
+
+    A word written on top of its own printing is still written: where the page carries
+    more of a word than the blank prints there ("Male" ticked by writing it over the
+    printed option), the value stands. A reviewer's taught slot is the reviewer's word
+    and keeps its own subtraction; only the readers' proposals are judged here. As
+    everywhere else, the value is blanked and the field kept.
+    """
+    if not layer:
+        return
+    page = [
+        (norm(z.text), ((z.x0 + z.x1) / 2) / w, ((z.y0 + z.y1) / 2) / h)
+        for z in words
+        if norm(z.text)
+    ]
+    for field in fields:
+        if field.source == "reviewer":
+            continue
+        value = field.normalized_value
+        if not isinstance(value, str) or not value.strip():
+            continue
+        box = field.answer_bbox
+        if _is_printing(value, _tokens_near(page, box), _tokens_near(layer, box)):
+            field.raw_value = None
+            field.normalized_value = None
+            field.is_blank = True
+
+
+def _tokens_near(items: list[tuple[str, float, float]], box: BoundingBox) -> Counter[str]:
+    return Counter(
+        token
+        for text, cx, cy in items
+        if box.x - PRINTING_MARGIN_X <= cx <= box.x + box.width + PRINTING_MARGIN_X
+        and box.y - PRINTING_MARGIN_Y <= cy <= box.y + box.height + PRINTING_MARGIN_Y
+        for token in text.split()
+    )
+
+
+def _is_printing(value: str, filled: Counter[str], printed: Counter[str]) -> bool:
+    """Whether a value is nothing but the printing around it."""
+    tokens = norm(value).split()
+    if not tokens:
+        return False
+    explained = 0
+    for token in tokens:
+        if printed[token]:
+            if filled[token] > printed[token]:
+                return False  # written on top of its own printing
+            explained += len(token)
+        elif any(_same_word(token, word) for word in printed):
+            explained += len(token)
+        elif len(token) <= 2 and not token.isdigit():
+            continue  # a tick box or a bracket as OCR reads it
+        else:
+            return False
+    return explained > 0 and explained >= PRINTING_SHARE * sum(len(t) for t in tokens)
+
+
+def _same_word(a: str, b: str) -> bool:
+    if min(len(a), len(b)) < 3:
+        return False
+    if abs(len(a) - len(b)) <= 1 and (a in b or b in a):
+        return True
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, a, b).ratio() >= PRINTING_SIMILARITY
 
 
 def _without_printed(words: list[Word], printed: str | None) -> list[Word]:
