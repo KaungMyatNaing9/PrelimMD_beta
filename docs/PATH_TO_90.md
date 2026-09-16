@@ -294,3 +294,15 @@ on the set it was developed against and loses elsewhere — rapidocr, self-templ
 - [KVP10k: dataset for key-value pair extraction, arXiv 2405.00505](https://arxiv.org/pdf/2405.00505)
 - [Best OCR for forms — zero-shot clinical figure](https://www.lido.app/blog/best-ocr-for-forms)
 - [Open-source OCR/document VLMs compared, 2026](https://www.spheron.network/blog/best-open-source-ocr-vlm-self-host-gpu-cloud-2026/)
+
+## Status, 2026-09-15 evening
+
+Reached on the corrected track: **93.4% recall / 71.8% precision** on the 112-form
+benchmark with the slot reader on (90.8 / 70.7 without it), and **88.9 / 64.0 on 21 unseen
+forms** collected after every rule was written and kept locked. What got it there, in
+order of size: the vision model reading each photograph's taught slots on one numbered
+sheet; the form's date as its own vocabulary key; captions cut off both ends of a slot
+reading; the blank's printing subtracted on the footprint it was recorded on; one-word
+captions cutting a value only after a case change or a gap; whole-word containment; and a
+benchmark oracle that teaches slots the way a reviewer places them. Details and every
+measurement in `docs/PROGRESS.md`, 2026-09-15.

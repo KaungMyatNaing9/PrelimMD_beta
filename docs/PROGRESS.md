@@ -2738,6 +2738,7 @@ layer at all ("1 0 / 1 0 /" then "02/22/2026"); the truth cannot be read from th
 | model, strip-border fixes as first written (part-of-OCR rule, full stop as fragment) | 91.2 | 71.9 | 92.4 | 89.8 |
 | **model, glued-letter split only (commit 8ba3fbc)** | **92.5%** | **72.0%** | 92.9 | **92.1** |
 | softened oracle (B4: whole unprinted hits preferred, 1,477 of 1,501 taught), committed code, **no model** | **90.8%** | 70.7% | 93.7 | 87.3 |
+| **softened oracle, committed code, model on** (21:40) | **93.4%** | **71.8%** | **94.2** | **92.4** |
 
 **Zero-shot did not pay for any of it.** The reader change (one-word captions) and the
 vocabulary key touch every track, so the zero-shot geometry bench was re-run on the day's
@@ -2831,3 +2832,20 @@ PDFs 60.1): the reader proposes more junk on new layouts than on the ones it was
 against all day. Zero-shot is ten points under LARGE's, which is what a set the rules were
 never fitted to should show. Nothing in the set was opened, and nothing will be tuned
 against it; the next unseen number comes from re-running these two commands.
+
+### End of day, 2026-09-15
+
+| track, 112 forms unless said | recall | precision |
+|---|---|---|
+| zero-shot, geometry only | 67.1% (was 64.6) | 68.9% |
+| one corrected fill per form, no model, slots placed as a reviewer would | **90.8%** | 70.7% |
+| one corrected fill per form, slot reader on (`SLOT_VISION=ollama`) | **93.4%** (was 85.4) | **71.8%** |
+| the same, on 21 unseen forms collected after every rule was written | **88.9%** | 64.0% |
+
+The model's arm on the re-taught templates is +232 / −9 fields against the morning,
+photographs 80.9 → 92.4, PDFs 89.2 → 94.2. Everything measured is committed (8ba3fbc,
+64f7cf1, a26aace; nothing pushed); the unit suite, lint, mypy and the smoke test are green;
+the UI backend on port 8000 runs the committed code. Open: precision, which moved a point
+where recall moved eight, and is where the unseen set falls furthest behind (64.0); and
+the unseen set's 88.9, which is the number to quote for "unseen accuracy" until it is
+re-measured after the next change.
