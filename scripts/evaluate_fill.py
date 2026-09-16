@@ -18,6 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+from app.services import pdf_backend
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
@@ -52,15 +55,14 @@ def _check(pdf: Path, template_id: str, wanted: dict) -> list:
     output with a lossy reader counts that reader's mistakes as ours. The text layer says
     exactly what was drawn and exactly where, which is the part this code controls.
     """
-    import fitz
-
+    
     # The template was written by the server process, so this one has to re-read the
     # registry before it can see it.
     registry.load()
-    page = fitz.open(pdf)[0]
-    width, height = page.rect.width, page.rect.height
-    drawn = [(w[4], (w[0] + w[2]) / 2 / width, (w[1] + w[3]) / 2 / height)
-             for w in page.get_text("words")]
+    page = pdf_backend.open_page(pdf, 0)
+    width, height = page.width, page.height
+    drawn = [(w.text, (w.x0 + w.x1) / 2 / width, (w.y0 + w.y1) / 2 / height)
+             for w in page.words()]
     slots = {f.field_id: f.bbox for f in registry.get(template_id).pages[0].fields}
 
     results = []

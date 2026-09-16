@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 import cv2
-import fitz
 
 from app.config import settings
 from app.schemas.form_understanding import DetectedFormField, FormAnalysis, RequiredStatus
 from app.schemas.models import BoundingBox, FieldType, TemplateField
+from app.services import pdf_backend
 from app.services.canonical_registry import PHRASING, known_captions, match, norm
 from app.services.field_layout import (
     MARKED_INK_RATIO,
@@ -1597,12 +1597,10 @@ def _read_pdf(folder: Path, pdf: Path, index: int = 0) -> SourcePage:
     Text coordinates are scaled into the rendered page's pixel space; both are divided by
     the same page size later, so the normalised boxes the API returns are unaffected.
     """
-    page = fitz.open(pdf)[index]
+    page = pdf_backend.open_page(pdf, index)
     # Page 0 keeps the plain name so everything already pointing at it still works.
     image = folder / ("normalized_color.png" if index == 0 else f"page_{index}.png")
-    page.get_pixmap(
-        matrix=fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE), alpha=False
-    ).save(image)
+    page.render(PDF_RENDER_SCALE, image)
     words = words_from_pdf(page)
     scaled = [
         word._replace(
@@ -1625,8 +1623,8 @@ def _read_pdf(folder: Path, pdf: Path, index: int = 0) -> SourcePage:
     return SourcePage(
         words=scaled,
         image=image,
-        width=page.rect.width * PDF_RENDER_SCALE,
-        height=page.rect.height * PDF_RENDER_SCALE,
+        width=page.width * PDF_RENDER_SCALE,
+        height=page.height * PDF_RENDER_SCALE,
         source="pdf_text",
         source_type="digital_flat_pdf",
         fingerprint=hashlib.sha256(pdf.read_bytes()).hexdigest(),
@@ -1679,7 +1677,7 @@ class FormAnalyzer:
         if pdf.exists():
             # Insurance, medications and consent live on later pages of a real intake
             # packet, so reading only the first threw away whole sections of the form.
-            count = min(len(fitz.open(pdf)), settings.max_pdf_pages)
+            count = min(pdf_backend.page_count(pdf), settings.max_pdf_pages)
             sources = [_read_pdf(folder, pdf, index) for index in range(count)]
         else:
             # A patient photographing a two-page form sends two pictures, so the image
@@ -1870,21 +1868,22 @@ def widget_boxes(pdf: Path, index: int) -> list[Box]:
     they were drawn.
     """
     try:
-        page = fitz.open(pdf)[index]
-    except (RuntimeError, ValueError, IndexError):
+        page = pdf_backend.open_page(pdf, index)
+    except Exception:  # noqa: BLE001 - an unreadable PDF has no widgets to offer
         return []
-    return [
-        Box(
-            widget.rect.x0 * PDF_RENDER_SCALE,
-            widget.rect.y0 * PDF_RENDER_SCALE,
-            widget.rect.x1 * PDF_RENDER_SCALE,
-            widget.rect.y1 * PDF_RENDER_SCALE,
-        )
-        for widget in page.widgets()
-        if widget.field_type_string == "Text"
-        and widget.rect.width > 0
-        and widget.rect.height > 0
-    ]
+    try:
+        return [
+            Box(
+                widget.x0 * PDF_RENDER_SCALE,
+                widget.y0 * PDF_RENDER_SCALE,
+                widget.x1 * PDF_RENDER_SCALE,
+                widget.y1 * PDF_RENDER_SCALE,
+            )
+            for widget in page.widgets()
+            if widget.kind == "Text" and widget.x1 > widget.x0 and widget.y1 > widget.y0
+        ]
+    finally:
+        page.close()
 
 
 def _image_url(analysis_id: str, index: int = 0) -> str:
