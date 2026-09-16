@@ -451,9 +451,52 @@ def _learn_page(
             )
         )
     page = TemplatePage(
-        page_index=index, canonical_width=width, canonical_height=height, fields=fields
+        page_index=index,
+        canonical_width=width,
+        canonical_height=height,
+        fields=fields,
+        printed_words=_printed_layer(pdf, index, page_words, width, height),
     )
     return page, blank, found
+
+
+def _printed_layer(
+    pdf: Path | None, index: int, page_words: list, width: int, height: int
+) -> list[tuple[str, float, float]]:
+    """What the form this template is learned from prints, word by word, in page fractions.
+
+    A PDF's own text layer where there is one -- exact, where OCR of the render drops and
+    splits words -- and the render's OCR otherwise. Learned from the blank, this is the
+    form's furniture; learned from a filled copy it would also hold that patient's
+    answers, which is one more reason enrolment starts from the blank.
+    """
+    if pdf is not None:
+        try:
+            page = pdf_backend.open_page(pdf, index)
+            try:
+                words, w, h = page.words(), page.width, page.height
+            finally:
+                page.close()
+        except Exception:  # noqa: BLE001 - no text layer to offer; fall back to OCR
+            words, w, h = [], 0.0, 0.0
+        if words and w and h:
+            return _as_layer(words, w, h)
+    return _as_layer(page_words, width, height)
+
+
+def _as_layer(words: list, width: float, height: float) -> list[tuple[str, float, float]]:
+    layer = []
+    for word in words:
+        text = norm(word.text)
+        if text:
+            layer.append(
+                (
+                    text,
+                    round((word.x0 + word.x1) / 2 / width, 4),
+                    round((word.y0 + word.y1) / 2 / height, 4),
+                )
+            )
+    return layer
 
 
 def learn_corrections(
