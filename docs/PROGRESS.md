@@ -2960,3 +2960,12 @@ photographs 87.6), 1,477 of 1,501 slots taught -- the same count as PyMuPDF's ru
 78.8% under the corrected scorer (separators ignored); the PyMuPDF run's 70.7 was scored
 before that fix and is not comparable. Reading through the permissive backend is
 therefore at least as good as through PyMuPDF on both tracks.
+
+### Regeneration and the slot reader through the ported backend (04:03)
+
+Placement **78.9%** within 2mm (15 of 19, median 1.11mm, worst 34.19mm) and round-trip
+**65.2%** (15 of 23 values, St. Clair 5 of 11) -- both to the decimal what the PyMuPDF
+backend last measured, so regeneration is unchanged by the port. The slot reader on the
+fresh templates: **93.0% recall / 79.8% precision** (PDFs 94.2, photographs 91.6) against
+93.4 / 71.8 on PyMuPDF's templates and the old scorer; 0.4 of recall inside the spread
+of a fresh teach, no model call timed out. The port is committed as 607d62b.
