@@ -189,13 +189,18 @@ def main() -> int:
                     found[key] = field["normalized_value"]
         # The same rule as `intake_field_coverage.py`, so the two figures stay comparable:
         # a value is vouched for when it and a written answer contain one another.
+        # Compared with separators collapsed, as recall is: the truth writes a phone four
+        # ways ("(423) 555-0157", "423 555 0157") and the reader normalises to one, and
+        # raw comparison counted three of the four as junk -- 7.6 points of precision on
+        # the corrected track (2026-09-15).
         valued = [
-            str(f.get("normalized_value")).strip().lower()
+            comparable(f.get("normalized_value"))
             for f in analysis["detected_fields"]
             if str(f.get("normalized_value") or "").strip()
         ]
-        wanted = {str(v).strip().lower() for v in expected.values() if str(v).strip()}
-        good = sum(1 for v in valued if any(v in w or w in v for w in wanted))
+        wanted = {comparable(v) for v in expected.values() if str(v).strip()}
+        wanted.discard("")
+        good = sum(1 for v in valued if v and any(v in w or w in v for w in wanted))
         proposed += len(valued)
         vouched += good
 

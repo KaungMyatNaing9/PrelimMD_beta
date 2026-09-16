@@ -71,9 +71,15 @@ def main() -> int:
             # on the page. Everything else is printed furniture the builder mistook for an
             # answer -- and `evaluate_real_forms.py` cannot see those, because it scores
             # only labels the ground truth names.
-            good = sum(1 for f in valued if any(
-                str(f.get("normalized_value")).strip().lower() in w
-                or w in str(f.get("normalized_value")).strip().lower() for w in wanted))
+            # Separators collapsed on both sides, as `evaluate_real_forms.py` does now: the
+            # truth writes a phone four ways and the reader one, and raw comparison
+            # counted three of the four as junk.
+            def _cmp(v):
+                return "".join(ch for ch in str(v).lower() if ch.isalnum())
+            wanted_c = {_cmp(w) for w in wanted} - {""}
+            good = sum(1 for f in valued if _cmp(f.get("normalized_value")) and any(
+                _cmp(f.get("normalized_value")) in w
+                or w in _cmp(f.get("normalized_value")) for w in wanted_c))
             set_good += good
             print(f"{form[:28]:28} {len(fields):6} {len(valued):6} {want:6} "
                   f"{len(valued) / want * 100 if want else 0:8.1f}%", flush=True)

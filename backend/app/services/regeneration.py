@@ -9,9 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-import fitz
-
 from app.schemas.models import FieldType, TemplateDefinition
+from app.services import pdf_backend
 from app.services.canonical_registry import CORPUS_KEY_ALIASES
 from app.services.templates import canonical_image_path
 
@@ -39,7 +38,7 @@ DESCENDER_MARGIN = 0.06
 
 def _descent(fontname: str) -> float:
     """How far below the baseline this face reaches, as a fraction of its point size."""
-    return abs(fitz.Font(fontname).descender) + DESCENDER_MARGIN
+    return pdf_backend.font_descender(fontname) + DESCENDER_MARGIN
 
 
 FONT = "helv"
@@ -123,33 +122,20 @@ def regenerate(
     page_def = template.pages[page_index]
     width, height = float(page_def.canonical_width), float(page_def.canonical_height)
 
-    doc = fitz.open()
-    page = doc.new_page(width=width, height=height)
-    page.insert_image(fitz.Rect(0, 0, width, height), filename=str(blank))
-
+    texts: list[pdf_backend.Text] = []
+    boxes: list[pdf_backend.TextBox] = []
     for field in page_def.fields:
         canonical = CORPUS_KEY_ALIASES.get(field.field_id, field.field_id)
         text = _text_for(values.get(canonical), field.field_type)
         if text is None:
             continue
         box = field.bbox
-        rect = fitz.Rect(
-            box.x * width,
-            box.y * height,
-            (box.x + box.width) * width,
-            (box.y + box.height) * height,
-        )
-        size = _font_size(rect.height, (field.font_size or 0) * height or None)
+        x0, y0 = box.x * width, box.y * height
+        x1, y1 = (box.x + box.width) * width, (box.y + box.height) * height
+        size = _font_size(y1 - y0, (field.font_size or 0) * height or None)
         if "\n" in text:
             # A multi-line value needs the whole region and grows downwards from its top.
-            page.insert_textbox(
-                rect + (2, 1, -2, -1),
-                text,
-                fontsize=size,
-                fontname=FONT,
-                color=(0.05, 0.05, 0.15),
-                align=fitz.TEXT_ALIGN_LEFT,
-            )
+            boxes.append(pdf_backend.TextBox(x0 + 2, y0 + 1, x1 - 2, y1 - 1, text, size))
             continue
         # A person writes *on* the rule at the foot of the space, not floating at its top,
         # but a text box lays its first line from the top edge. Filling the whole region
@@ -157,15 +143,10 @@ def regenerate(
         # identically on every correctly placed field. Setting the baseline directly puts
         # the value back on the rule. Shrinking the box instead silently renders nothing
         # when the text no longer fits.
-        page.insert_text(
-            fitz.Point(rect.x0 + _indent(field, size, width), rect.y1 - size * _descent(FONT)),
-            text,
-            fontsize=size,
-            fontname=FONT,
-            color=(0.05, 0.05, 0.15),
+        texts.append(
+            pdf_backend.Text(x0 + _indent(field, size, width), y1 - size * _descent(FONT), text, size)
         )
-
-    return doc.tobytes()
+    return pdf_backend.compose(blank, width, height, texts, boxes, fontname=FONT)
 
 
 def label_key(label: str) -> str:

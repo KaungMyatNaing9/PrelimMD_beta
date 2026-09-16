@@ -17,7 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import fitz
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+from app.services import pdf_backend
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -80,11 +81,14 @@ MIN_KEY_LENGTH = 4
 
 def _lines_from_pdf(pdf: Path) -> list[list[tuple[str, float, float, float, float]]]:
     """Each drawn line of the regenerated page as words in page fractions."""
-    page = fitz.open(pdf)[0]
-    width, height = page.rect.width, page.rect.height
+    page = pdf_backend.open_page(pdf, 0)
+    width, height = page.width, page.height
     grouped: dict[tuple[int, int], list[tuple]] = {}
-    for word in page.get_text("words"):
-        grouped.setdefault((word[5], word[6]), []).append(word)
+    for word in page.words():
+        # One line per block and baseline, as PyMuPDF's (block, line) numbering gave.
+        grouped.setdefault((word.block, round(word.y0 * 10)), []).append(
+            (word.x0, word.y0, word.x1, word.y1, word.text)
+        )
     lines = []
     for run in grouped.values():
         run.sort(key=lambda w: w[0])

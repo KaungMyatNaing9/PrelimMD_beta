@@ -17,7 +17,6 @@ import logging
 from pathlib import Path
 
 import cv2
-import fitz
 import numpy as np
 
 from app.config import settings
@@ -30,6 +29,7 @@ from app.schemas.models import (
     TemplateField,
     TemplatePage,
 )
+from app.services import pdf_backend
 from app.services.canonical_registry import match, norm
 from app.services.field_layout import split_runs
 from app.services.form_analyzer import PRINTED_MARGIN, geometric_fields, widget_boxes
@@ -233,6 +233,13 @@ def _text_indent(bbox, words, page_w: float, page_h: float) -> float | None:
     return indent if 0 <= indent <= 0.1 else None
 
 
+# The band a form is filled at, as a fraction of page height: 5pt to 24pt on a letter
+# page. Outside it a measured size is a misreading of a rule, a barcode or a heading.
+MIN_FILL_SIZE = 0.006
+MAX_FILL_SIZE = 0.03
+MIN_FILL_MEASUREMENTS = 3
+
+
 def _font_size_of(bbox, words, page_w: float, page_h: float) -> float | None:
     """The point size the text in a region was set at, or None if it held nothing.
 
@@ -267,7 +274,7 @@ def _font_size_of(bbox, words, page_w: float, page_h: float) -> float | None:
     sizes = []
     for run in split_runs(line):
         run.sort(key=lambda w: w.x0)
-        at_one_point = fitz.get_text_length(
+        at_one_point = pdf_backend.text_length(
             " ".join(w.text for w in run), fontname="helv", fontsize=1.0
         )
         if at_one_point <= 0:
@@ -404,7 +411,12 @@ def _learn_page(
         for f in boxed
         if (size := _font_size_of(f.answer_bbox, page_words, width, height)) is not None
     ]
-    fill_size = sorted(measured)[len(measured) // 2] if measured else None
+    # A page-wide size needs a page's worth of evidence. One measurement is whatever
+    # happened to sit in one region -- a barcode's glyphs read the whole hoag form at 63
+    # pixels (2026-09-15) -- and a size outside the band forms are filled at (about 5 to
+    # 24 points on a letter page) is a misreading, not a size.
+    measured = [size for size in measured if MIN_FILL_SIZE <= size <= MAX_FILL_SIZE]
+    fill_size = sorted(measured)[len(measured) // 2] if len(measured) >= MIN_FILL_MEASUREMENTS else None
     used: set[str] = set()
     fields = []
     for field in boxed:

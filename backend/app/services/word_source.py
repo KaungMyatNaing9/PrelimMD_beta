@@ -62,14 +62,11 @@ def pdf_marks(page) -> list[PdfMark]:
     glyphs -- most forms in this project's corpus -- and rendered-page ink measurement is
     still how those are read.
     """
-    chars: list[tuple[str, str, tuple[float, float, float, float], int]] = []
-    for block in page.get_text("rawdict")["blocks"]:
-        for line in block.get("lines", []):
-            for span in line["spans"]:
-                font = span["font"].lower()
-                for ch in span["chars"]:
-                    if ch["c"].strip():
-                        chars.append((ch["c"], font, tuple(ch["bbox"]), id(block)))
+    chars: list[tuple[str, str, tuple[float, float, float, float], int]] = [
+        (ch.text, ch.font.lower(), (ch.x0, ch.y0, ch.x1, ch.y1), ch.block)
+        for ch in page.chars()
+        if ch.text.strip()
+    ]
 
     anchors = [c for c in chars if any(d in c[1] for d in DINGBAT_FONTS)]
     anchor_ids = {id(a) for a in anchors}
@@ -100,7 +97,7 @@ def words_from_pdf(page) -> list[Word]:
 
     Deliberately unfiltered so grouping matches the raw ``get_text("words")`` output.
     """
-    words = [Word(w[0], w[1], w[2], w[3], w[4], int(w[5]), 1.0) for w in page.get_text("words")]
+    words = page.words()
     # A PDF that draws its rules with underscores glues them to whatever text abuts them,
     # so the same separation the OCR path needs is needed here.
     return _split_glued_labels(words)

@@ -2825,6 +2825,23 @@ score on B, model on), totals only:
 |---|---|---|---|---|
 | zero-shot, geometry only (LARGE: 67.1 / 68.9) | 57.4% | 63.5% | 61.4 | 52.4 |
 | **one corrected fill per form, model on** (LARGE: 92.1 / 72.0) | **88.9%** | **64.0%** | 88.5 | 89.4 |
+| blank enrolled, no corrections, no model | 60.3 | 61.1 | 63.7 | 56.2 |
+| one corrected fill per form, no model | 88.7 | 64.0 | 88.9 | 88.4 |
+| **no blank anywhere**: template from patient A's filled copy, no corrections, no model | 56.4 | 56.0 | 60.6 | 51.3 |
+| **no blank anywhere**: template from A's filled copy + A's corrections, no model | **88.4** | 62.9 | 89.4 | 87.3 |
+
+Measured later the same evening (the user asked for the tiers by capability): enrolling
+the blank alone is worth +2.9 over OCR on the unseen forms, the corrections are worth
++28 on top, and the slot reader only +0.2 there (88.7 → 88.9) where it was +2.6 on
+LARGE -- so on new layouts the reviewer's corrections carry the track, not the model.
+
+The user then asked whether the full system works with no blank at all. Measured with
+patient A's filled copy standing in for the blank (byte for byte; the scored folder holds
+no original blank either): registration from a filled copy alone is worth nothing (56.4
+against 57.4 for OCR alone -- the first patient's answers are recorded as printing and
+subtracted from the next), but with the one corrected copy the track reads **88.4 / 62.9
+against 88.7 / 64.0 with the blank**. The blank is worth 0.3 recall and 1.1 precision to
+reading; its real value is the master for regeneration.
 
 So the corrected track carries to layouts nobody tuned against at 88.9 recall, three
 points under LARGE's 92.1, and precision is where the gap is wider (64.0 against 72.0,
@@ -2849,3 +2866,97 @@ the UI backend on port 8000 runs the committed code. Open: precision, which move
 where recall moved eight, and is where the unseen set falls furthest behind (64.0); and
 the unseen set's 88.9, which is the number to quote for "unseen accuracy" until it is
 re-measured after the next change.
+
+## 2026-09-15 (night) — PyMuPDF out of the product
+
+The user asked for the licence conflict to be resolved: PyMuPDF is AGPL and the project
+ships under Apache 2.0. Nothing under `backend/app/` imports it any more. The reader's
+needs from a PDF were small and each has a permissive source now, behind one module,
+`app/services/pdf_backend.py`: characters with fonts and positions from pdfminer.six
+(MIT, through pdfplumber), text widgets and font descriptors from pypdf (BSD), page
+rendering from pypdfium2 (Apache/BSD), and the regenerated page from reportlab (BSD).
+
+Three of PyMuPDF's habits had to be reproduced on purpose, each found by comparing the
+two libraries word for word on all 545 benchmark pages:
+
+1. **Words in content-stream order.** pdfminer's default layout sorts by position, so a
+   value a filling tool wrote on top of a rule came out as "Name__O__tt_il_ie". In stream
+   order the value is its own run, as MuPDF reports it.
+2. **A word is as tall as its font's ascent to descent**, from the font descriptor, not
+   the font size; every gap and tolerance in the reader is a multiple of the median word
+   height. Descriptors that write the descent positive (Calibri, Wingdings) are read as
+   MuPDF reads them, below the baseline; fonts drawn inside form XObjects are looked up
+   there; the base fourteen use MuPDF's own figures.
+3. **Coordinates from the crop box's top-left corner**, undoing pdfplumber's habit of
+   measuring from a media box that need not start at zero (eight forms begin at y = 7.92).
+
+The implicit space between glyphs with no space character was calibrated at 0.14 of the
+font size. Agreement with PyMuPDF on the benchmark: 98.2% of word tokens identical on
+first pages (97.7% over three pages), x-coordinates exact, vertical extents within a
+point on 95% of words, page sizes identical everywhere, text widgets identical on 219 of
+223 pages (the rest differ in the first decimal). The benchmark oracle
+(`evaluate_corrected.py`) and the two placement scripts run on the same module and place
+302 of 303 slots identically on twenty fills. `scripts/fill_forms.py`, which wrote the
+benchmark's synthetic fills, keeps PyMuPDF behind an optional `bench` extra: it never
+runs in the product and its output on disk is the fixed benchmark.
+
+Verified end to end below: the zero-shot and corrected tracks on the ported backend
+against the same runs on the PyMuPDF backend, and regeneration of three forms through
+both servers side by side.
+
+### Rendering, derivation and regeneration through both backends
+
+Renders (pdfium against MuPDF at 2x on five forms): same pixel size everywhere, ink
+coverage within 0.8 points, Tesseract word counts within a few words, mean pixel
+difference 0.7 to 6.7 of 255; poppler's `pdftoppm` sits between the two. Templates
+derived from the same three blanks by both servers: field counts within one, no slot
+moved more than 0.3% of the page, printed text identical on most slots, the rest OCR
+noise from the slightly different render (a curly apostrophe, a stray "/").
+
+Regeneration of three forms through both servers, rendered side by side: both produce
+valid pages of the same size with the values on their rules -- and the **PyMuPDF server's
+hoag page was wrong**, every value drawn 63 pixels tall over its neighbours. The cause
+was not the library but the template builder: the page-wide fill size is the median of
+whatever `_font_size_of` measured in any field, and on that form the only measurement
+came from a barcode's glyphs. The ported server escaped it by chance (its OCR of the
+render measured nothing there and fell back to the box-derived guess). Fixed for both:
+a page-wide size now needs at least three measurements inside the band forms are filled
+at (5 to 24 points on a letter page), or the box-derived guess stands.
+
+### Two defects the port's benchmark run found, and one in the unseen tiers
+
+1. **Text outside the page box.** pdfminer reports characters printed in a trimmed
+   margin; MuPDF never did. A word past the page's edge became a normalised box past
+   1.0 and a 500 on 53 of the benchmark PDFs. Characters are now clipped to the page box
+   as MuPDF clips them (789 benchmark pages checked, none outside).
+2. **Unmapped glyphs.** pdfminer writes "(cid:123)" for a glyph a font cannot map to a
+   character; two forms grew 164 and 98 junk fields out of the markers (recall unchanged
+   at 67.1 either way). The markers are dropped; both forms read the same word count as
+   MuPDF again (404 and 102).
+3. **The unseen "OCR + vision" row was not a vision run.** Its 57.4 / 63.5 is identical to
+   OCR alone because every page-level model call timed out at 120 s while the slot-vision
+   arms held the GPU, and the cache stored the failures as failures, by design. 225
+   cached failures were purged (the paused LARGE hybrid pass will retry those pages when
+   resumed) and the two rows that need the page-level model are re-run with one worker
+   and a five-minute timeout once the GPU is free. The "everything on" row running at the
+   time had seven timeouts of its own and is re-run the same way.
+
+### The machine restarted at 01:48
+
+The reboot killed every server and measurement and emptied the scratchpad: the taught
+template snapshots and every result file of the day are gone (the numbers themselves are
+recorded above). The code survived, so did the model cache. Read before the restart and
+kept: the ported backend's zero-shot run agreed with PyMuPDF's to one field (67.1 / 1,862
+against 1,863 of 2,775) with no errors. Lost and re-run in one chain on the idle machine:
+the corrected track through the ported backend with a fresh teach (against 90.8 / 70.7),
+the same with the slot reader (against 93.4 / 71.8), placement and round-trip, and the
+three unseen rows that need a model, each with one worker and a five-minute timeout.
+
+### Corrected track through the ported backend (03:14)
+
+Fresh teach and score with no model, ported backend: **91.2% recall** (PDFs 94.2,
+photographs 87.6), 1,477 of 1,501 slots taught -- the same count as PyMuPDF's run and
+0.4 above its 90.8 (PDFs 93.7, photographs 87.3). No request failed. Precision reads
+78.8% under the corrected scorer (separators ignored); the PyMuPDF run's 70.7 was scored
+before that fix and is not comparable. Reading through the permissive backend is
+therefore at least as good as through PyMuPDF on both tracks.

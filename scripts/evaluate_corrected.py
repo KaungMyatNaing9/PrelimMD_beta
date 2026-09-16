@@ -25,11 +25,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-import fitz
-
 ROOT = Path(__file__).resolve().parents[1]
 FORMS = ROOT / "data" / "real-forms"
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "backend"))
+from app.services import pdf_backend
 from evaluate_enrolled import api_json, enrol, templates
 
 MAX_PAGES = 5
@@ -39,7 +39,7 @@ def comparable(value) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
-def _region(rect: fitz.Rect, page: fitz.Page) -> dict:
+def _region(rect: pdf_backend.Rect, page: pdf_backend.Page) -> dict:
     """A slot around where a value sits, with room to its right for a longer one.
 
     The next patient's surname is longer or shorter than this one's, so the region is
@@ -48,7 +48,7 @@ def _region(rect: fitz.Rect, page: fitz.Page) -> dict:
     state's region reached into the zip beside it and read "TN 37421", and that reading
     then outranked the page's correct "TN". A reviewer drawing the region would stop at
     the caption; so does this."""
-    w, h = page.rect.width, page.rect.height
+    w, h = page.width, page.height
     # A wider left margin than before: the next patient writes a few pixels further left
     # and a region starting inside the first glyph read "Ingrid" as "rid". Less reach
     # above and below: a tall region caught the line beneath a one-line answer.
@@ -56,19 +56,19 @@ def _region(rect: fitz.Rect, page: fitz.Page) -> dict:
     x1 = min(0.98, rect.x1 / w + max(0.12, 1.5 * rect.width / w))
     beside = [
         word
-        for word in page.get_text("words")
-        if word[0] >= rect.x1 - 1
-        and min(word[3], rect.y1) - max(word[1], rect.y0) > 0.5 * rect.height
+        for word in page.words()
+        if word.x0 >= rect.x1 - 1
+        and min(word.y1, rect.y1) - max(word.y0, rect.y0) > 0.5 * rect.height
     ]
     if beside:
-        x1 = min(x1, max(rect.x1 / w + 0.01, min(word[0] for word in beside) / w - 0.005))
+        x1 = min(x1, max(rect.x1 / w + 0.01, min(word.x0 for word in beside) / w - 0.005))
     y0 = max(0.0, rect.y0 / h - 0.2 * rect.height / h)
     y1 = min(0.995, rect.y1 / h + 0.2 * rect.height / h)
     return {"x": round(x0, 4), "y": round(y0, 4), "width": round(x1 - x0, 4),
             "height": round(y1 - y0, 4)}
 
 
-def _nearest_to_caption(hits: list[fitz.Rect], captions: list[fitz.Rect]) -> fitz.Rect:
+def _nearest_to_caption(hits: list[pdf_backend.Rect], captions: list[pdf_backend.Rect]) -> pdf_backend.Rect:
     """Of several places a value occurs, the one written beside or beneath its caption.
 
     A patient and their emergency contact can share a surname, and the first occurrence
@@ -76,7 +76,7 @@ def _nearest_to_caption(hits: list[fitz.Rect], captions: list[fitz.Rect]) -> fit
     if len(hits) == 1 or not captions:
         return hits[0]
 
-    def distance(hit: fitz.Rect) -> float:
+    def distance(hit: pdf_backend.Rect) -> float:
         best = float("inf")
         for cap in captions:
             dx, dy = hit.x0 - cap.x1, hit.y0 - cap.y0
@@ -88,30 +88,30 @@ def _nearest_to_caption(hits: list[fitz.Rect], captions: list[fitz.Rect]) -> fit
     return min(hits, key=distance)
 
 
-def _whole_word(hit: fitz.Rect, page: fitz.Page, value: str) -> bool:
+def _whole_word(hit: pdf_backend.Rect, page: pdf_backend.Page, value: str) -> bool:
     """Whether the words under a hit read as the value and nothing more: "PA" inside
     "Partner" and "Zephyr" inside the e-mail are not places a reviewer would put a slot."""
     under = [
-        w for w in page.get_text("words")
-        if fitz.Rect(w[:4]).intersects(hit)
-        and min(w[3], hit.y1) - max(w[1], hit.y0) > 0.5 * (w[3] - w[1])
+        w for w in page.words()
+        if pdf_backend.Rect(w.x0, w.y0, w.x1, w.y1).intersects(hit)
+        and min(w.y1, hit.y1) - max(w.y0, hit.y0) > 0.5 * (w.y1 - w.y0)
     ]
-    text = " ".join(w[4] for w in sorted(under, key=lambda w: w[0]))
+    text = " ".join(w.text for w in sorted(under, key=lambda w: w.x0))
     return comparable(text) == comparable(value)
 
 
-def _printed_there(hit: fitz.Rect, blank: fitz.Page | None, value: str) -> bool:
+def _printed_there(hit: pdf_backend.Rect, blank: pdf_backend.Page | None, value: str) -> bool:
     """Whether the blank prints the same text in the same place -- the option label
     "Male" beside the box, as against the "Male" the patient wrote."""
     if blank is None:
         return False
     return any(
         printed.intersects(hit) and (printed & hit).get_area() > 0.5 * hit.get_area()
-        for printed in blank.search_for(value)
+        for printed in blank.search(value)
     )
 
 
-def _where_written(page: fitz.Page, blank: fitz.Page | None, value: str) -> list[fitz.Rect]:
+def _where_written(page: pdf_backend.Page, blank: pdf_backend.Page | None, value: str) -> list[pdf_backend.Rect]:
     """The places a reviewer might put the slot for a value, best kind first.
 
     Whole words the blank does not print are what a reviewer points at. Measured with
@@ -120,7 +120,7 @@ def _where_written(page: fitz.Page, blank: fitz.Page | None, value: str) -> list
     there, and the slot read it once the printing was subtracted. So the stricter kinds
     are preferred, not required -- except that a value shorter than four characters is
     never taught from inside another word, which is how a state got taught "Partner"."""
-    hits = page.search_for(str(value))
+    hits = page.search(str(value))
     whole = [h for h in hits if _whole_word(h, page, value)]
     if not whole and len(comparable(value)) < 4:
         return []
@@ -130,17 +130,21 @@ def _where_written(page: fitz.Page, blank: fitz.Page | None, value: str) -> list
 
 
 def oracle_corrections(fill: Path, truth: dict[str, str]) -> list[dict]:
-    doc = fitz.open(fill)
     blank_path = fill.with_name(fill.name.replace("_FILLED", ""))
-    blank = fitz.open(blank_path) if blank_path != fill and blank_path.exists() else None
+    has_blank = blank_path != fill and blank_path.exists()
+    count = min(pdf_backend.page_count(fill), MAX_PAGES)
+    pages = [pdf_backend.open_page(fill, index) for index in range(count)]
+    blanks = [
+        pdf_backend.open_page(blank_path, index) if has_blank and index < pdf_backend.page_count(blank_path) else None
+        for index in range(count)
+    ]
     out = []
     for label, value in truth.items():
-        for index in range(min(doc.page_count, MAX_PAGES)):
-            page = doc[index]
-            printed_page = blank[index] if blank is not None and index < blank.page_count else None
+        for index in range(count):
+            page, printed_page = pages[index], blanks[index]
             hits = _where_written(page, printed_page, str(value))
             if hits:
-                hit = _nearest_to_caption(hits, page.search_for(label))
+                hit = _nearest_to_caption(hits, page.search(label))
                 out.append({"page_index": index, "label": label, "value": str(value),
                             "bbox": _region(hit, page)})
                 break
