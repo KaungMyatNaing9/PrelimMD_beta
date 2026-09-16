@@ -2825,10 +2825,17 @@ score on B, model on), totals only:
 |---|---|---|---|---|
 | zero-shot, geometry only (LARGE: 67.1 / 68.9) | 57.4% | 63.5% | 61.4 | 52.4 |
 | **one corrected fill per form, model on** (LARGE: 92.1 / 72.0) | **88.9%** | **64.0%** | 88.5 | 89.4 |
+| **zero-shot, OCR + page-level vision** (re-run 2026-09-16, one worker, 5-minute timeout, 85 model calls, none failed; precision under the corrected scorer) | **73.5** | 51.1 | 73.1 | 74.1 |
 | blank enrolled, no corrections, no model | 60.3 | 61.1 | 63.7 | 56.2 |
 | one corrected fill per form, no model | 88.7 | 64.0 | 88.9 | 88.4 |
 | **no blank anywhere**: template from patient A's filled copy, no corrections, no model | 56.4 | 56.0 | 60.6 | 51.3 |
 | **no blank anywhere**: template from A's filled copy + A's corrections, no model | **88.4** | 62.9 | 89.4 | 87.3 |
+| **no blank anywhere**, slot reader on (2026-09-16, corrected scorer) | **89.9** | 69.3 | 90.7 | 88.9 |
+| **everything on**: blank enrolled + one corrected copy + page vision + slot reader + re-linker (2026-09-16, one worker, 5-minute timeout, 7 dense pages still timed out; corrected scorer) | **93.3** | 53.1 | 93.4 | 93.1 |
+
+The rows above were scored under two versions of the precision test (separators
+counted before 22:40 on 2026-09-15, ignored after), so their precision columns are not
+one series; the no-model rows are re-scored under the corrected test below.
 
 Measured later the same evening (the user asked for the tiers by capability): enrolling
 the blank alone is worth +2.9 over OCR on the unseen forms, the corrections are worth
@@ -2969,3 +2976,28 @@ backend last measured, so regeneration is unchanged by the port. The slot reader
 fresh templates: **93.0% recall / 79.8% precision** (PDFs 94.2, photographs 91.6) against
 93.4 / 71.8 on PyMuPDF's templates and the old scorer; 0.4 of recall inside the spread
 of a fresh teach, no model call timed out. The port is committed as 607d62b.
+
+### The unseen table, one scorer, one code (2026-09-16 afternoon)
+
+Every row re-run on commit bcfb523 (ported backend, no part-of-OCR rule) under the
+corrected precision test, one series at last. The corrected rows read higher than
+yesterday's because yesterday's ran with the part-of-OCR rule that was later reverted
+(−25 fields on LARGE) and on the PyMuPDF backend.
+
+| unseen set, 21 forms, 40 artefacts, 415 fields | recall | precision |
+|---|---|---|
+| OCR + form registered + one corrected copy, no model | 92.0 | 70.0 |
+| the same, slot reader on (the full system) | **93.3** | 70.3 |
+| no blank anywhere, one corrected copy, no model | 89.2 | 69.0 |
+| no blank anywhere, one corrected copy, slot reader on | 89.9 | 69.3 |
+| no blank anywhere, registered from the filled copy only | 56.6 | 62.0 |
+| everything on (page vision and re-linker added to the full system) | 93.3 | 53.1 |
+
+| OCR only, nothing set up | 57.4 | 66.9 |
+| OCR + page-level vision, nothing set up | 73.5 | 51.1 |
+| OCR + form registered from the blank, no corrections, no model | 62.7 | 66.1 |
+
+Complete, one series. The frozen system on forms nobody tuned against: **93.3 / 70.3
+with the blank registered and one corrected copy per form**, 89.9 / 69.3 with no blank
+at all, 57.4 / 66.9 with nothing set up, and the page-level model is worth +16 recall
+only where nothing is set up, at −16 precision.
