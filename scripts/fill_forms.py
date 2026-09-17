@@ -534,14 +534,16 @@ WIDGET_LABELS = {_widget_key(label): (label, key) for label, key in LABELS.items
 
 
 def fill_widgets(
-    page, patient: dict[str, str], skip: set[str], *, check: bool
+    page, patient: dict[str, str], skip: set[str], *, check: bool,
+    labels: dict[str, str] = LABELS,
 ) -> tuple[dict[str, str], list[str]]:
     written: dict[str, str] = {}
     skipped: list[str] = []
+    by_name = WIDGET_LABELS if labels is LABELS else {_widget_key(lab): (lab, key) for lab, key in labels.items()}
     for widget in page.widgets():
         if widget.field_type_string != "Text":
             continue
-        known = WIDGET_LABELS.get(_widget_key(widget.field_name))
+        known = by_name.get(_widget_key(widget.field_name))
         if not known:
             continue
         label, key = known
@@ -565,8 +567,62 @@ def fill_widgets(
     return written, skipped
 
 
+# --thorough: more of what an intake packet asks, for a set filled as completely as the
+# forms allow. Drawn from a second generator seeded apart from the patient's, so the
+# existing sets' patients -- and their ground truth -- are exactly what they were.
+LABELS_MORE: dict[str, str] = {
+    "Emergency Contact Phone": "emergency_phone",
+    "Emergency Phone": "emergency_phone",
+    "Referring Physician": "referring",
+    "Referred by": "referring",
+    "Reason for Today's Visit": "reason",
+    "Reason for Visit": "reason",
+    "Reason for Appointment": "reason",
+    "Current Medications": "medications",
+    "Medications": "medications",
+    "Allergies": "allergies",
+    "Pharmacy Phone": "pharmacy_phone",
+    "Mobile Phone": "cell_phone",
+    "Subscriber Name": "full_name",
+    "Policy Holder": "full_name",
+    "Height": "height",
+    "Weight": "weight",
+    "Age": "age",
+}
+
+ALLERGIES = ["No known allergies", "Penicillin", "Sulfa drugs", "Latex", "Shellfish",
+             "Codeine", "Peanuts", "Bee stings", "None"]
+MEDICATIONS = ["None", "Lisinopril 10 mg daily", "Metformin 500 mg", "Levothyroxine 50 mcg",
+               "Atorvastatin 20 mg", "Albuterol inhaler", "Sertraline 50 mg", "Omeprazole 20 mg"]
+REASONS = ["Annual physical", "Knee pain", "Follow-up visit", "Skin rash", "Headaches",
+           "Lower back pain", "Hearing check", "Allergy testing", "Blood pressure check"]
+
+
+def more_for(key: str, patient: dict[str, str]) -> dict[str, str]:
+    """The extra answers --thorough writes, for the patient already drawn for ``key``."""
+    rng = random.Random(int(hashlib.sha256(f"{key}#more".encode()).hexdigest()[:16], 16))
+    area = re.sub(r"\D", "", patient["home_phone"])[:3]
+    feet, inches = rng.choice([4, 5, 5, 5, 6, 6]), rng.randrange(0, 12)
+    return {
+        "age": str(2026 - int(patient["dob"][-4:])),
+        "allergies": rng.choice(ALLERGIES),
+        "medications": rng.choice(MEDICATIONS),
+        "reason": rng.choice(REASONS),
+        "referring": f"Dr. {rng.choice(FIRST)[0]} {rng.choice(LAST)}",
+        "pharmacy_phone": f"{area}-555-01{rng.randrange(0, 100):02d}",
+        "height": f"{feet} ft {inches} in",
+        "weight": f"{rng.randrange(98, 260)} lbs",
+    }
+
+
+# The smallest size --thorough shrinks a value to when the space after its label is short.
+# Seven points is the floor Tesseract reads reliably at 150dpi (see ``fill_widgets``).
+MIN_FIT_SIZE = 7.0
+
+
 def fill_page(
-    page, patient: dict[str, str], skip: set[str] = frozenset(), *, check: bool
+    page, patient: dict[str, str], skip: set[str] = frozenset(), *, check: bool,
+    labels: dict[str, str] = LABELS, shrink: bool = False,
 ) -> tuple[dict[str, str], list[str]]:
     written: dict[str, str] = {}
     skipped: list[str] = []
@@ -579,7 +635,7 @@ def fill_page(
     # is tried first claims the span -- so dictionary order silently decided that a street
     # address got written onto the email line. Ordering by length makes the more specific
     # label win wherever one label contains another.
-    for label, key in sorted(LABELS.items(), key=lambda kv: -len(kv[0])):
+    for label, key in sorted(labels.items(), key=lambda kv: -len(kv[0])):
         if key not in patient or label in written or label in skip:
             continue
         found = find_label(page, label)
@@ -600,7 +656,14 @@ def fill_page(
             for c in claimed
         ):
             continue
-        if needed > free_space(page, x, (bbox[1] + bbox[3]) / 2, size, own=bbox, cap=cap):
+        room = free_space(page, x, (bbox[1] + bbox[3]) / 2, size, own=bbox, cap=cap)
+        if needed > room and shrink and room > 0 and size * room / needed >= MIN_FIT_SIZE:
+            # Written smaller, as a patient does when the line is short -- never below
+            # the size a reader can be expected to read.
+            size = int(size * room / needed * 10) / 10
+            needed = fitz.get_text_length(value, fontname=FONT, fontsize=size)
+            here = (x, bbox[1], x + needed, bbox[3])
+        if needed > room:
             skipped.append(f"{label} (no room)")
             continue
         claimed.append(here)
@@ -625,7 +688,11 @@ def main() -> int:
     # A second fill of the same blanks with a *different* patient per form, for measuring
     # what a template learns from one fill on another: the enrolled track's whole claim.
     ap.add_argument("--variant", default="", help="seed suffix: a different patient per form")
+    # Fill as completely as the forms allow: more of an intake packet's questions, and a
+    # value shrunk (never below 7pt) where the line after its label is short.
+    ap.add_argument("--thorough", action="store_true")
     args = ap.parse_args()
+    labels = {**LABELS, **LABELS_MORE} if args.thorough else LABELS
 
     folder = ROOT / args.dir
     truth: dict[str, dict[str, str]] = {}
@@ -635,9 +702,10 @@ def main() -> int:
             continue
         doc = fitz.open(pdf)
         # Seeded from the form's name, so this form always draws this patient.
-        patient = patient_for(
-            "one-patient" if args.same_patient else f"{pdf.stem}#{args.variant}".rstrip("#")
-        )
+        seed = "one-patient" if args.same_patient else f"{pdf.stem}#{args.variant}".rstrip("#")
+        patient = patient_for(seed)
+        if args.thorough:
+            patient.update(more_for(seed, patient))
         all_written: dict[str, str] = {}
         per_page: list[dict[str, str]] = []
         notes: list[str] = []
@@ -645,10 +713,12 @@ def main() -> int:
             page = doc[index]
             # Widgets first: where a form offers a typed field, that is where the answer
             # goes, and the printed caption beside it has no rule to write on anyway.
-            typed, tight = fill_widgets(page, patient, set(all_written), check=args.check)
+            typed, tight = fill_widgets(page, patient, set(all_written), check=args.check, labels=labels)
             all_written.update(typed)
             notes += tight
-            written, skipped = fill_page(page, patient, set(all_written), check=args.check)
+            written, skipped = fill_page(
+                page, patient, set(all_written), check=args.check, labels=labels, shrink=args.thorough
+            )
             all_written.update(written)
             per_page.append({**typed, **written})
             notes += skipped
@@ -698,7 +768,8 @@ def main() -> int:
                 indent=2,
             )
         )
-        print(f"\nwrote {record.relative_to(ROOT)} covering {sum(len(v) for v in truth.values())} fields")
+        shown = record.relative_to(ROOT) if record.is_relative_to(ROOT) else record
+    print(f"\nwrote {shown} covering {sum(len(v) for v in truth.values())} fields")
     return 0
 
 
