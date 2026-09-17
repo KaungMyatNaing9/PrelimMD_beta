@@ -30,7 +30,7 @@ FORMS = ROOT / "data" / "real-forms"
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "backend"))
 from app.services import pdf_backend
-from evaluate_enrolled import api_json, enrol, templates
+from evaluate_enrolled import api_json, enrol_run, templates
 
 MAX_PAGES = 5
 
@@ -180,6 +180,8 @@ def main() -> int:
     parser.add_argument("--positions", choices=["none", "detected", "oracle"], default="oracle")
     parser.add_argument("--dump", default=None)
     parser.add_argument("--parallel", type=int, default=1, help="scoring workers")
+    parser.add_argument("--no-same-copy", action="store_true",
+                        help="diagnostic: do not tell the server a correction is of the enrolled copy")
     parser.add_argument(
         "--templates-dir", default=None,
         help="the folder the backend was started with as DERIVED_TEMPLATES_DIR; with "
@@ -198,6 +200,14 @@ def main() -> int:
     truths = {name: json.loads((FORMS / name / "ground_truth_new.json").read_text())
               for name in args.learn}
     before = templates(args.api)
+    if before:
+        # A template already registered is read through by every upload scored here: a
+        # server stopped mid-enrolment finished writing one into a freshly emptied folder
+        # and one unseen form was read through it for a whole run (2026-09-16, recall
+        # 93.3 -> 86.7 on a set that had not changed). A score is only a score of the
+        # templates this run creates.
+        print(f"!! the backend already holds templates {sorted(before)}; refusing to score")
+        return 1
     snapshot = Path(args.snapshot) if args.snapshot else None
     if snapshot and args.templates_dir and snapshot.is_dir() and any(snapshot.iterdir()):
         # A backend started on an empty folder loads its registry at first use, so the
@@ -220,7 +230,7 @@ def main() -> int:
         created = []
     taught = 0
     for blank in blanks:
-        template_id, note = enrol(args.api, blank)
+        template_id, note, enrolled_run = enrol_run(args.api, blank)
         if not template_id:
             print(f"  {blank.name:28} --     {note}")
             continue
@@ -230,9 +240,18 @@ def main() -> int:
             fill = FORMS / name / f"{blank.stem}_FILLED.pdf"
             expected = truths[name].get(fill.name, {})
             if args.positions == "oracle" and fill.exists():
-                corrections += oracle_corrections(fill, expected)
+                found = oracle_corrections(fill, expected)
             elif args.positions == "detected" and fill.exists():
-                corrections += detected_corrections(args.api, fill, expected)
+                found = detected_corrections(args.api, fill, expected)
+            else:
+                found = []
+            # A set with no blank enrols a filled copy in the blank's place; a reviewer
+            # correcting that copy is correcting the analysis the template came from, and
+            # says so, as the review page does.
+            if found and not args.no_same_copy and blank.read_bytes() == fill.read_bytes():
+                for correction in found:
+                    correction["analysis_id"] = enrolled_run
+            corrections += found
         if corrections:
             made = api_json(["curl", "-s", "--max-time", "600", "-X", "POST",
                              f"{args.api}/api/v1/templates/{template_id}/corrections",

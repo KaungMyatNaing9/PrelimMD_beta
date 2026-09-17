@@ -442,3 +442,16 @@ class TestBlankPrinting:
         assert consent.normalized_value is None
         assert tick.normalized_value is True
 
+
+class TestCorrectingTheEnrolledCopy:
+    def test_the_patients_answer_leaves_the_printed_layer(self):
+        from app.schemas.models import BoundingBox
+        from app.services.template_builder import _layer_without, _without_tokens
+
+        box = BoundingBox(x=0.30, y=0.50, width=0.20, height=0.02)
+        layer = [("sex", 0.25, 0.51), ("male", 0.32, 0.51), ("female", 0.38, 0.51), ("male", 0.45, 0.51), ("tx", 0.9, 0.9)]
+        # Patient A wrote "Male" at 0.45: one "male" goes, the printed option stays.
+        assert _layer_without(layer, box, "Male") == [("sex", 0.25, 0.51), ("female", 0.38, 0.51), ("male", 0.45, 0.51), ("tx", 0.9, 0.9)] or \
+            _layer_without(layer, box, "Male") == [("sex", 0.25, 0.51), ("male", 0.32, 0.51), ("female", 0.38, 0.51), ("tx", 0.9, 0.9)]
+        assert _without_tokens("Sex: Male Female Male", "Male") == "Sex: Female Male"
+        assert _without_tokens(None, "Male") is None

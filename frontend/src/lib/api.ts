@@ -7,7 +7,7 @@ export async function analyze(files:File|File[]){const body=new FormData();const
 // stays for PDFs and for anything already calling this.
 if(list.length===1)body.append("file",list[0]);else list.forEach(f=>body.append("files",f));const r=await fetch(`${BASE}/api/v1/form-analyses`,{method:"POST",body});if(!r.ok)throw new Error(await r.text());return r.json()}
 export async function getAnalysis(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}`,{cache:"no-store"});if(!r.ok)throw new Error(await r.text());return r.json()}
-export type SlotCorrection={page_index:number;label:string;bbox:{x:number;y:number;width:number;height:number};value?:string|null};
+export type SlotCorrection={page_index:number;label:string;bbox:{x:number;y:number;width:number;height:number};value?:string|null;analysis_id?:string|null};
 // A reviewer's word on where an answer lives teaches the matched template: the slot is
 // read there on every later copy of the form. Positions are page fractions.
 export async function teachTemplate(templateId:string,corrections:SlotCorrection[]){const r=await fetch(`${BASE}/api/v1/templates/${templateId}/corrections`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(corrections)});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{template_id:string;page_count:number;field_count:number}>}

@@ -41,26 +41,32 @@ def templates(api: str) -> set[str]:
 
 def enrol(api: str, blank: Path) -> tuple[str | None, str]:
     """Learn a template from a blank form, as a clinic's first upload would."""
+    template_id, note, _ = enrol_run(api, blank)
+    return template_id, note
+
+
+def enrol_run(api: str, blank: Path) -> tuple[str | None, str, str | None]:
+    """``enrol``, also returning the analysis the template was learned from."""
     analysis = api_json(["curl", "-s", "--max-time", "600", "-X", "POST",
                          f"{api}/api/v1/form-analyses",
                          "-F", f"file=@{blank};type=application/pdf"])
     run_id = analysis.get("analysis_id")
     if not run_id:
-        return None, "analysis failed"
+        return None, "analysis failed", None
     made = api_json(["curl", "-s", "--max-time", "600", "-X", "POST",
                      f"{api}/api/v1/form-analyses/{run_id}/derive-template"])
     if not made:
         # A crash answers with a plain-text 500, not JSON. Reporting that as "not
         # derivable" hid a hard cap of fifty derived ids for a whole day.
-        return None, "server error (see the backend log)"
+        return None, "server error (see the backend log)", run_id
     if made.get("template_id"):
         # The route returns a summary (template_id, field_count, field ids), not the
         # template's pages. Reading pages[0].fields here printed "0 slots" for every
         # enrolment, which read as "the template is empty" when it was not.
-        return made["template_id"], f"{made.get('field_count', '?')} slots"
+        return made["template_id"], f"{made.get('field_count', '?')} slots", run_id
     detail = made.get("detail")
     message = detail.get("message") if isinstance(detail, dict) else detail
-    return None, str(message or "not derivable")[:70]
+    return None, str(message or "not derivable")[:70], run_id
 
 
 def main() -> int:
@@ -73,6 +79,14 @@ def main() -> int:
 
     folder = FORMS / args.which
     before = templates(args.api)
+    if before:
+        # A template already registered is read through by every upload scored here: a
+        # server stopped mid-enrolment finished writing one into a freshly emptied folder
+        # and one unseen form was read through it for a whole run (2026-09-16, recall
+        # 93.3 -> 86.7 on a set that had not changed). A score is only a score of the
+        # templates this run creates.
+        print(f"!! the backend already holds templates {sorted(before)}; refusing to score")
+        return 1
     blanks = [p for p in sorted(folder.glob("*.pdf")) if not p.stem.endswith("_FILLED")]
     print(f"enrolling {len(blanks)} blank forms from {args.which}")
     created = []
