@@ -386,34 +386,45 @@ class TestTranscriptionParts:
 
 class TestBlankPrinting:
     def test_an_option_list_the_blank_prints_is_not_an_answer(self):
-        from collections import Counter
-
         from app.services.form_analyzer import _is_printing
 
-        printed = Counter({"male": 1, "female": 1})
-        assert _is_printing("Male Female", Counter({"male": 1, "female": 1}), printed)
-        assert _is_printing("Interpreter Needed? Yes / No", Counter(["interpreter", "needed", "yes", "no"]), Counter(["interpreter", "needed", "yes", "no"]))
+        assert _is_printing("Male Female", ["sex", "male", "female"], ["sex", "male", "female"])
+        assert _is_printing("Interpreter Needed? Yes / No", ["interpreter", "needed", "yes", "no"], ["interpreter", "needed", "yes", "no"])
+        assert _is_printing("Male/Female", ["male", "female"], ["male", "female"])
 
     def test_a_word_written_over_its_own_printing_is_an_answer(self):
-        from collections import Counter
-
         from app.services.form_analyzer import _is_printing
 
-        assert not _is_printing("Male", Counter({"male": 2, "female": 1}), Counter({"male": 1, "female": 1}))
+        assert not _is_printing("Male", ["male", "male", "female"], ["male", "female"])
 
     def test_a_patients_words_are_never_printing(self):
-        from collections import Counter
-
         from app.services.form_analyzer import _is_printing
 
-        assert not _is_printing("Analise", Counter({"first": 1, "name": 1, "analise": 1}), Counter({"first": 1, "name": 1}))
-        assert not _is_printing("TX", Counter({"tx": 1}), Counter())
-        assert not _is_printing("Savannah Name", Counter({"savannah": 1, "name": 1}), Counter({"name": 1}))
+        assert not _is_printing("Analise", ["first", "name", "analise"], ["first", "name"])
+        assert not _is_printing("TX", ["tx"], [])
+        assert not _is_printing("Savannah Name", ["savannah", "name"], ["name"])
+        # A name like a printed word is still the patient's: the page carries both.
+        assert not _is_printing("Mariana", ["marital", "status", "mariana"], ["marital", "status"])
 
-    def test_ocr_misreadings_of_printing_are_still_printing(self):
-        from collections import Counter
-
+    def test_ocr_misreadings_and_cut_pieces_of_printing_are_still_printing(self):
         from app.services.form_analyzer import _is_printing
 
-        assert _is_printing("OMale Female", Counter({"omale": 1, "female": 1}), Counter({"male": 1, "female": 1}))
-        assert _is_printing("J Home !4J Cell", Counter({"j": 1, "home": 1, "4j": 1, "cell": 1}), Counter({"home": 1, "cell": 1, "work": 1}))
+        assert _is_printing("OMale Female", ["omale", "female"], ["male", "female"])
+        assert _is_printing("J Home !4J Cell", ["j", "home", "4j", "cell"], ["home", "cell", "work"])
+        assert _is_printing("0 Male 0 Female", ["0", "male", "0", "female"], ["male", "female"])
+        assert _is_printing("kelavionsnip to", ["kelavionsnip", "to"], ["relationship", "to"])
+        assert _is_printing("ERS", ["home", "phone", "numbers"], ["home", "phone", "numbers"])
+
+    def test_tick_box_answers_are_left_to_the_ink(self):
+        from app.schemas.models import FieldType
+        from app.services.form_analyzer import _blank_printing
+        from app.services.word_source import Word
+
+        married = _field("Marital Status", "Married", 0.3, 0.5, w=0.1, h=0.02)
+        married.field_type = FieldType.MULTIPLE_CHOICE
+        written = _field("Sex", "Male Female", 0.3, 0.7, w=0.1, h=0.02)
+        layer = [("single married", 0.33, 0.51), ("male female", 0.33, 0.71)]
+        words = [Word(300, 505, 360, 515, "Single Married", 0, 0.9), Word(300, 705, 360, 715, "Male Female", 0, 0.9)]
+        _blank_printing([married, written], layer, words, 1000, 1000)
+        assert married.normalized_value == "Married"
+        assert written.normalized_value is None

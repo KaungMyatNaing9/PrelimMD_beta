@@ -14,6 +14,7 @@ form make that unambiguous, since whatever is identical across them is the templ
 """
 
 import logging
+import re
 from pathlib import Path
 
 import cv2
@@ -487,7 +488,8 @@ def _printed_layer(
 def _as_layer(words: list, width: float, height: float) -> list[tuple[str, float, float]]:
     layer = []
     for word in words:
-        text = norm(word.text)
+        # Split at punctuation, as the reader's printing rule compares words.
+        text = " ".join(re.findall(r"[a-z0-9]+", word.text.lower()))
         if text:
             layer.append(
                 (
