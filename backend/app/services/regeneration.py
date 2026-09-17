@@ -41,7 +41,16 @@ def _descent(fontname: str) -> float:
     return pdf_backend.font_descender(fontname) + DESCENDER_MARGIN
 
 
-FONT = "helv"
+# Regenerated values are drawn in an upright serif and in green. The benchmark's fills
+# are navy Helvetica, and a regenerated page in the same lettering could not be told from
+# a page whose values were simply carried over from the original (user, 2026-09-16).
+# Slanted Helvetica was tried first: OCR misread its glyphs ("Apt 3B" -> "AptSB",
+# "Daniel" -> "Danie!") and the round trip lost a value. Sizes and indents are measured in
+# Helvetica, so each value is set at the size that gives it Helvetica's width there
+# (``MEASURED_FACE``), which keeps its span -- and its placement -- where it was.
+FONT = "tiro"
+MEASURED_FACE = "helv"
+INK = (0.0, 0.42, 0.22)
 # A value starts a little in from where its rule does, rather than hard against it. Scaled
 # to the text, not a fixed number of page units: a derived template's page is measured in
 # the pixels of the render it was learned from, so a constant "2" meant 2px there and 2pt
@@ -57,7 +66,22 @@ def _indent(field, size: float, page_width: float) -> float:
     return size * INDENT_EM
 
 
-def _font_size(height_pt: float, learned: float | None = None) -> float:
+def _width_matched(text: str, size: float) -> float:
+    """The size at which ``text`` in ``FONT`` is as wide as in ``MEASURED_FACE`` at ``size``."""
+    drawn = pdf_backend.text_length(text, FONT, 1.0)
+    if drawn <= 0:
+        return size
+    return size * pdf_backend.text_length(text, MEASURED_FACE, 1.0) / drawn
+
+
+# A letter page is 612 points across. A template learned from a render is measured in that
+# render's pixels, twice as dense, so the fallback's bounds are scaled by the page's own
+# width: a fixed 6-12 read as 3-6 points on a 2x render and printed values nobody could
+# read comfortably (2026-09-16).
+LETTER_WIDTH_PT = 612.0
+
+
+def _font_size(height_pt: float, learned: float | None = None, page_width: float = LETTER_WIDTH_PT) -> float:
     """The size to redraw a value at: the one the form was filled at, where that is known.
 
     Deriving it from the *box* is a guess, and on a ruled field the box is the whole
@@ -69,7 +93,8 @@ def _font_size(height_pt: float, learned: float | None = None) -> float:
     """
     if learned:
         return learned
-    return max(6.0, min(12.0, height_pt * 0.55))
+    scale = page_width / LETTER_WIDTH_PT
+    return max(6.0 * scale, min(12.0 * scale, height_pt * 0.55))
 
 
 def unplaced(
@@ -132,7 +157,7 @@ def regenerate(
         box = field.bbox
         x0, y0 = box.x * width, box.y * height
         x1, y1 = (box.x + box.width) * width, (box.y + box.height) * height
-        size = _font_size(y1 - y0, (field.font_size or 0) * height or None)
+        size = _font_size(y1 - y0, (field.font_size or 0) * height or None, width)
         if "\n" in text:
             # A multi-line value needs the whole region and grows downwards from its top.
             boxes.append(pdf_backend.TextBox(x0 + 2, y0 + 1, x1 - 2, y1 - 1, text, size))
@@ -143,10 +168,11 @@ def regenerate(
         # identically on every correctly placed field. Setting the baseline directly puts
         # the value back on the rule. Shrinking the box instead silently renders nothing
         # when the text no longer fits.
+        drawn = _width_matched(text, size)
         texts.append(
-            pdf_backend.Text(x0 + _indent(field, size, width), y1 - size * _descent(FONT), text, size)
+            pdf_backend.Text(x0 + _indent(field, size, width), y1 - drawn * _descent(FONT), text, drawn)
         )
-    return pdf_backend.compose(blank, width, height, texts, boxes, fontname=FONT)
+    return pdf_backend.compose(blank, width, height, texts, boxes, fontname=FONT, color=INK)
 
 
 def label_key(label: str) -> str:
