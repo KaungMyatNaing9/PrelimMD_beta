@@ -2325,16 +2325,27 @@ def _printed_layer(template_id: str, page_index: int) -> list[tuple[str, float, 
 
 
 # How far around a proposed value's region the printing and the page's own words are
-# gathered, in page fractions: the same footprint a slot's printed text is recorded on.
-PRINTING_MARGIN_X = PRINTED_MARGIN
-PRINTING_MARGIN_Y = PRINTED_MARGIN / 2
+# gathered, in page fractions. Wider than a slot's own printed-text footprint: a slot cut
+# through a printed word reads a piece of it ("ERS" of "NUMBERS"), and the word's centre
+# lies outside the slot.
+PRINTING_MARGIN_X = 0.03
+PRINTING_MARGIN_Y = 0.012
 # The least share of a value's characters the blank's printing must account for before
 # the value is called printing. The rest may only be OCR's reading of a tick box or a
-# bracket -- a token of one or two letters -- never a word of its own.
+# bracket -- a token of one or two characters -- never a word of its own.
 PRINTING_SHARE = 0.5
 # How alike an OCR token and a printed word must be to be the same word misread:
-# "omale" for "male", "hispaniclatinx" for "hispaniclatino".
-PRINTING_SIMILARITY = 0.8
+# "omale" for "male", "kelavionsnip" for "relationship".
+PRINTING_SIMILARITY = 0.7
+# The shortest piece of a printed word that counts as that word, cut at a region's edge.
+PRINTING_FRAGMENT = 3
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(text: str) -> list[str]:
+    """Words as the printing rule compares them: split at every non-alphanumeric, so a
+    text layer's "Male/Female" and OCR's "Male /Female" are the same two words."""
+    return _TOKEN.findall(text.lower())
 
 
 def _blank_printing(
@@ -2353,20 +2364,21 @@ def _blank_printing(
     track (2026-09-16), 548 of 731 values that were no answer at all were this.
 
     A word written on top of its own printing is still written: where the page carries
-    more of a word than the blank prints there ("Male" ticked by writing it over the
-    printed option), the value stands. A reviewer's taught slot is the reviewer's word
-    and keeps its own subtraction; only the readers' proposals are judged here. As
+    more of a word than the blank prints there ("Male" written over the printed option),
+    the value stands. A reviewer's taught slot is the reviewer's word and keeps its own
+    subtraction. A tick-box answer is exempt too: its value *is* the printed caption of
+    what was ticked, and whether a box was ticked is a question of ink, not of text. As
     everywhere else, the value is blanked and the field kept.
     """
     if not layer:
         return
     page = [
-        (norm(z.text), ((z.x0 + z.x1) / 2) / w, ((z.y0 + z.y1) / 2) / h)
+        (" ".join(_tokens(z.text)), ((z.x0 + z.x1) / 2) / w, ((z.y0 + z.y1) / 2) / h)
         for z in words
-        if norm(z.text)
+        if _tokens(z.text)
     ]
     for field in fields:
-        if field.source == "reviewer":
+        if field.source == "reviewer" or field.field_type in (FieldType.MULTIPLE_CHOICE, *MARK_TYPES):
             continue
         value = field.normalized_value
         if not isinstance(value, str) or not value.strip():
@@ -2378,44 +2390,72 @@ def _blank_printing(
             field.is_blank = True
 
 
-def _tokens_near(items: list[tuple[str, float, float]], box: BoundingBox) -> Counter[str]:
-    return Counter(
+def _tokens_near(items: list[tuple[str, float, float]], box: BoundingBox) -> list[str]:
+    return [
         token
         for text, cx, cy in items
         if box.x - PRINTING_MARGIN_X <= cx <= box.x + box.width + PRINTING_MARGIN_X
         and box.y - PRINTING_MARGIN_Y <= cy <= box.y + box.height + PRINTING_MARGIN_Y
-        for token in text.split()
-    )
+        for token in _tokens(text)
+    ]
 
 
-def _is_printing(value: str, filled: Counter[str], printed: Counter[str]) -> bool:
-    """Whether a value is nothing but the printing around it."""
-    tokens = norm(value).split()
+def _is_printing(value: str, filled: list[str], printed: list[str]) -> bool:
+    """Whether a value is nothing but the printing around it.
+
+    Each word of the value is matched to one printed word nearby: the same word, OCR's
+    misreading of it, or a piece of it cut at a region's edge. A matched word still
+    counts as written when the page carries more words like it than the blank prints
+    there. Words of one or two characters that match nothing are tick-box noise.
+    """
+    tokens = _tokens(value)
     if not tokens:
         return False
+    used = [False] * len(printed)
     explained = 0
     for token in tokens:
-        if printed[token]:
-            if filled[token] > printed[token]:
-                return False  # written on top of its own printing
-            explained += len(token)
-        elif any(_same_word(token, word) for word in printed):
-            explained += len(token)
-        elif len(token) <= 2 and not token.isdigit():
-            continue  # a tick box or a bracket as OCR reads it
-        else:
+        match_at, fragment = _printed_match(token, printed, used)
+        if match_at < 0:
+            if len(token) <= 2:
+                continue
             return False
+        used[match_at] = True
+        word = printed[match_at]
+
+        def alike(other: str, word: str = word, token: str = token, fragment: bool = fragment) -> bool:
+            if other == word:
+                return True
+            if fragment:
+                return token in other
+            return min(len(other), len(word)) >= 3 and _similarity(other, word) >= PRINTING_SIMILARITY
+
+        if sum(1 for other in filled if alike(other)) > sum(1 for other in printed if alike(other)):
+            return False  # the page carries more of this word than the blank prints
+        explained += len(token)
     return explained > 0 and explained >= PRINTING_SHARE * sum(len(t) for t in tokens)
 
 
-def _same_word(a: str, b: str) -> bool:
-    if min(len(a), len(b)) < 3:
-        return False
-    if abs(len(a) - len(b)) <= 1 and (a in b or b in a):
-        return True
+def _printed_match(token: str, printed: list[str], used: list[bool]) -> tuple[int, bool]:
+    """The printed word a value's word is, as (index, is a fragment), or (-1, False)."""
+    best, best_score, fragment = -1, 0.0, False
+    for index, word in enumerate(printed):
+        if used[index]:
+            continue
+        if word == token:
+            return index, False
+        if min(len(token), len(word)) >= 3:
+            score = _similarity(token, word)
+            if score >= PRINTING_SIMILARITY and score > best_score:
+                best, best_score, fragment = index, score, False
+        if best < 0 and len(token) >= PRINTING_FRAGMENT and len(word) > len(token) and token in word:
+            best, fragment = index, True
+    return best, fragment
+
+
+def _similarity(a: str, b: str) -> float:
     from difflib import SequenceMatcher
 
-    return SequenceMatcher(None, a, b).ratio() >= PRINTING_SIMILARITY
+    return SequenceMatcher(None, a, b).ratio()
 
 
 def _without_printed(words: list[Word], printed: str | None) -> list[Word]:

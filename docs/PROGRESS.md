@@ -3037,3 +3037,36 @@ No artefact lost a correct field. It needs no model and no reviewer: it applies 
 page matched a template learned from a blank, so the registered-only tier gains too.
 Templates learned before this change carry no printed layer and need re-enrolment to
 benefit. The locked unseen set is being re-measured with it.
+
+### The rule, revised, and the unseen set (2026-09-16 night)
+
+Measured on the locked unseen set with the first version: full system precision 70.3 ->
+88.3, recall unchanged at 93.3. Two things were then changed, both general:
+
+1. **Tick-box answers are exempt.** A choice field's value is the printed caption of the
+   box that was ticked, so the rule as first written would have erased every real tick
+   ("Married") as printing. The benchmark's fills write text and never tick, which is why
+   no number showed it; five false tick detections it had cleared came back.
+2. **Printing is matched the way OCR actually misreads it.** Words are split at
+   punctuation ("Male/Female" is two words on both sides), each value word is matched to
+   one printed word nearby -- the word itself, an OCR variant of it (0.7 similarity:
+   "kelavionsnip" for "relationship"), or a piece of it cut at a region's edge ("ERS" of
+   "NUMBERS", the untaught slots' commonest junk on photographs) -- the region reaches
+   0.03 of the page sideways, and one- or two-character tokens that match nothing are
+   tick-box noise. The surplus check is per matched word: a patient's "Mariana" beside a
+   printed "Marital" is kept because the page carries both.
+
+| corrected track | recall | precision | PDF precision | photo precision |
+|---|---|---|---|---|
+| benchmark, no model, before the rule | 91.2 | 78.8 | 78.3 | 79.5 |
+| benchmark, first rule | 91.2 | 93.0 | 97.9 | 87.7 |
+| **benchmark, revised rule** | **91.2** | **93.8** | 97.5 | **89.7** |
+| unseen, full system, before the rule | 93.3 | 70.3 | 65.1 | 77.5 |
+| unseen, full system, first rule | 93.3 | 88.3 | 88.7 | 87.9 |
+| **unseen, full system, revised rule** | **93.3** | **89.6** | 89.8 | 89.3 |
+
+Other unseen rows with the revised rule: registered from the blank only 63.2 / 90.9; one
+corrected copy without the model 92.0 / 89.1; no blank anywhere 88.7 / 88.6 (recall −1.2
+against the same row without the rule: a template derived from a filled copy records that
+patient's answers as printing, as expected). No artefact on the benchmark lost a correct
+field to either version.
