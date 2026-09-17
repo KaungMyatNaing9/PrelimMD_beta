@@ -365,6 +365,7 @@ def derive_template(
         version=1,
         page_count=len(learned),
         pages=[page for page, _, _ in learned],
+        derived_from=analysis.analysis_id,
     )
     (out / "template.json").write_text(definition.model_dump_json(indent=2))
     registry.load()
@@ -461,6 +462,53 @@ def _learn_page(
     return page, blank, found
 
 
+# How far beyond a taught region an answer's words are looked for in the printed layer:
+# the layer holds word centres, and a value can start a hair before the region drawn.
+TAUGHT_LAYER_MARGIN = 0.012
+
+
+def _without_tokens(text: str | None, value: str) -> str | None:
+    """``text`` with the words of ``value`` removed, once each."""
+    if not text:
+        return text
+    remaining: dict[str, int] = {}
+    for token in re.findall(r"[a-z0-9]+", value.lower()):
+        remaining[token] = remaining.get(token, 0) + 1
+    kept = []
+    for word in text.split():
+        key = "".join(re.findall(r"[a-z0-9]+", word.lower()))
+        if key and remaining.get(key, 0) > 0:
+            remaining[key] -= 1
+            continue
+        kept.append(word)
+    return " ".join(kept) or None
+
+
+def _layer_without(
+    layer: list[tuple[str, float, float]], bbox, value: str
+) -> list[tuple[str, float, float]]:
+    """The printed layer less the words of ``value`` found inside ``bbox``, once each."""
+    remaining: dict[str, int] = {}
+    for token in re.findall(r"[a-z0-9]+", value.lower()):
+        remaining[token] = remaining.get(token, 0) + 1
+    m = TAUGHT_LAYER_MARGIN
+    out = []
+    for text, cx, cy in layer:
+        inside = bbox.x - m <= cx <= bbox.x + bbox.width + m and bbox.y - m / 2 <= cy <= bbox.y + bbox.height + m / 2
+        if not inside:
+            out.append((text, cx, cy))
+            continue
+        kept = []
+        for token in text.split():
+            if remaining.get(token, 0) > 0:
+                remaining[token] -= 1
+                continue
+            kept.append(token)
+        if kept:
+            out.append((" ".join(kept), cx, cy))
+    return out
+
+
 def _printed_layer(
     pdf: Path | None, index: int, page_words: list, width: int, height: int
 ) -> list[tuple[str, float, float]]:
@@ -554,6 +602,17 @@ def learn_corrections(
                 words_by_page[correction.page_index] = None
         known = words_by_page[correction.page_index]
         printed = _printed_inside(correction.bbox, *known) if known else None
+        if (
+            correction.value
+            and correction.analysis_id
+            and correction.analysis_id == definition.derived_from
+        ):
+            # The reviewer is correcting the copy this template was learned from, so the
+            # value is that patient's answer. Recorded as printing it would be subtracted
+            # from, or cleared as furniture on, the next patient who gives the same
+            # answer -- the no-blank path's whole recall loss. It is taken back out.
+            printed = _without_tokens(printed, correction.value)
+            page.printed_words = _layer_without(page.printed_words, correction.bbox, correction.value)
         slot = TemplateField(
             field_id=field_id,
             label=correction.label,

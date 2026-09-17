@@ -86,6 +86,10 @@ class SlotCorrection(BaseModel):
     label: str
     bbox: BoundingBox
     value: str | None = None
+    # The analysis the reviewer was correcting. When it is the copy the template itself
+    # was learned from -- a clinic with no blank enrols a filled form -- the corrected
+    # value is that patient's answer, which the template had recorded as printing.
+    analysis_id: str | None = None
 
 
 class TemplatePage(BaseModel):
@@ -119,6 +123,9 @@ class TemplateDefinition(BaseModel):
     version: int = Field(ge=1)
     page_count: int = Field(gt=0)
     pages: list[TemplatePage]
+    # The analysis this template was learned from, so a correction of that same copy can
+    # take its patient's answers back out of what the template calls printing.
+    derived_from: str | None = None
 
     @model_validator(mode="after")
     def page_count_matches(self):
