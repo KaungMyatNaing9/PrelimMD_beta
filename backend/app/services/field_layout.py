@@ -6,13 +6,15 @@ This module finds those boxes from the page's rule lines and binds each to its
 nearest label, so the value is whatever OCR read *inside* the box.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
 
 import cv2
 import numpy as np
 
-from app.services.word_source import Word, group_lines_tolerant
+from app.config import settings
+from app.services.word_source import Word, group_lines_tolerant, words_in_region
 
 
 class Box(NamedTuple):
@@ -222,24 +224,149 @@ def detect_checkboxes(image_path: Path, words: list[Word] | None = None) -> list
     # carried marks: the Sex row lost the one box a patient had ticked and kept Male and
     # Other. Requiring the run to be meaningfully wider keeps the case the veto was built
     # for -- ":" inside "DOB:", a digit inside "1420" -- and drops the case it was not.
+    found += _marked_boxes(image, binary, found)
+
     if words is not None:
         text_runs = [w for w in words if len(_alphanumeric(w.text)) >= 3]
-        found = [
-            b
-            for b in found
-            if not any(
-                _contained_share(b, Box(t.x0, t.y0, t.x1, t.y1)) > 0.6
-                and (t.x1 - t.x0) >= (b.x1 - b.x0) * VETO_WIDTH_RATIO
-                for t in text_runs
-            )
-        ]
 
-    # A drawn box yields an inner and an outer contour a pixel or two apart.
+        def vetoes(b: Box) -> list[Word]:
+            return [
+                t for t in text_runs
+                if _contained_share(b, Box(t.x0, t.y0, t.x1, t.y1)) > 0.6
+                and (t.x1 - t.x0) >= (b.x1 - b.x0) * VETO_WIDTH_RATIO
+            ]
+
+        kept: list[Box] = []
+        doubted: list[Box] = []
+        for b in found:
+            by = vetoes(b)
+            if not by:
+                kept.append(b)
+            elif all(t.confidence < GLUED_CONFIDENCE for t in by):
+                doubted.append(b)
+        # OCR also reads a box as a letter glued to its own caption -- "mMale", "OOther",
+        # "ElRetired" -- and then the box lies inside a longer word like any glyph would.
+        # A bold capital B or D at the start of a heading passes every shape test a box
+        # does, so shape cannot settle it; two things together can. OCR doubts a word it
+        # made out of a box (below 0.7 on 25 of 29 glued words measured, above 0.85 on
+        # nearly every clean word), and a box has company: another box of its size level
+        # with it on the row. A PDF's text layer is exact and never restores anything.
+        real = _deduplicated(kept)
+        found = kept + [b for b in doubted if _level_sibling(b, real)]
+
+    return _deduplicated(found)
+
+
+def _deduplicated(boxes: list[Box]) -> list[Box]:
+    """One box per drawn outline: a drawn box yields an inner and an outer contour a pixel
+    or two apart."""
     unique: list[Box] = []
-    for candidate in sorted(found, key=lambda b: b.width * b.height, reverse=True):
+    for candidate in sorted(boxes, key=lambda b: b.width * b.height, reverse=True):
         if not any(_iou(candidate, k) > 0.5 for k in unique):
             unique.append(candidate)
     return unique
+
+
+# Below this OCR confidence a word that swallowed a tick box may be the box glued to its
+# caption rather than a word the box-shaped glyph belongs to.
+GLUED_CONFIDENCE = 0.7
+
+
+# A marked box, as seen by the second pass: each of its four sides dark along most of its
+# length, and its inside not solid.
+MARKED_EDGE_COVERAGE = 0.8
+MARKED_MIN_INK = 0.25
+MARKED_MAX_INK = 0.95
+# How far, in box sizes, a marked box's unmarked sibling may be.
+SIBLING_REACH = 30
+
+
+def _marked_boxes(image: np.ndarray, binary: np.ndarray, found: list[Box]) -> list[Box]:
+    """Tick boxes a mark has joined to their own outline.
+
+    The polygon pass asks for a clean four-cornered outline, and a small box with an X in
+    it is no longer one: the strokes touch the sides, the contour gains corners, and the
+    shape fills half its bounding box. Measured on the benchmark's ticked copies, 44 of
+    233 ticked boxes were missing for exactly this reason -- the boxes a patient marked,
+    and no others. Keeping only horizontal and vertical strokes removes the diagonals of
+    an X or a tick and leaves the outline, which is found again the same way; a candidate
+    is kept only if the original page shows all four of its sides.
+    """
+    h, w = image.shape
+    small = min(w, h)
+    k = max(3, int(CHECKBOX_MIN_SIDE * small * 0.6))
+    horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)))
+    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, k)))
+    outline = cv2.bitwise_or(horizontal, vertical)
+    contours, _ = cv2.findContours(outline, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    added: list[Box] = []
+    for contour in contours:
+        approx = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            continue
+        x, y, bw, bh = cv2.boundingRect(approx)
+        if bw <= 0 or bh <= 0:
+            continue
+        aspect = max(bw / bh, bh / bw)
+        side = max(bw, bh) / small
+        if not (aspect <= CHECKBOX_ASPECT and CHECKBOX_MIN_SIDE <= side <= CHECKBOX_MAX_SIDE):
+            continue
+        box = Box(float(x), float(y), float(x + bw), float(y + bh))
+        if any(_iou(box, other) > 0.5 for other in found + added):
+            continue
+        ink = ink_ratio(image, box)
+        # Only what the first pass had reason to miss: a box carrying a mark, beside an
+        # unmarked sibling of its own size in the same row or column. Measured on untouched
+        # blanks, straight strokes alone close into squares everywhere -- letters, table
+        # rules -- and 1,765 of them came through without these two conditions.
+        if not (MARKED_MIN_INK <= ink <= MARKED_MAX_INK) or not _four_sides(binary, x, y, bw, bh):
+            continue
+        if not _has_sibling(box, found):
+            continue
+        added.append(box)
+    return added
+
+
+def _has_sibling(box: Box, boxes: list[Box]) -> bool:
+    """Whether a box of about this size sits level with it, or directly above or below."""
+    for other in boxes:
+        if not (0.75 <= other.width / box.width <= 1.33 and 0.75 <= other.height / box.height <= 1.33):
+            continue
+        same_row = abs((other.y0 + other.y1) - (box.y0 + box.y1)) / 2 <= box.height / 2
+        same_column = abs((other.x0 + other.x1) - (box.x0 + box.x1)) / 2 <= box.width / 2
+        near = abs(other.x0 - box.x0) <= SIBLING_REACH * box.width and abs(other.y0 - box.y0) <= SIBLING_REACH * box.height
+        if (same_row or same_column) and near:
+            return True
+    return False
+
+
+def _level_sibling(box: Box, boxes: list[Box]) -> bool:
+    """Whether another box of this size sits level with it on its row."""
+    for other in boxes:
+        if not (0.8 <= other.width / box.width <= 1.25 and 0.8 <= other.height / box.height <= 1.25):
+            continue
+        level = abs((other.y0 + other.y1) - (box.y0 + box.y1)) / 2 <= box.height / 2
+        near = abs(other.x0 - box.x0) <= SIBLING_REACH * box.width
+        if level and near and _iou(other, box) < 0.5:
+            return True
+    return False
+
+
+def _four_sides(binary: np.ndarray, x: int, y: int, bw: int, bh: int) -> bool:
+    """Whether all four sides of a rectangle are drawn along most of their length."""
+    def covered(band: np.ndarray, along_axis: int) -> float:
+        if band.size == 0:
+            return 0.0
+        return float((band.max(axis=along_axis) > 0).mean())
+
+    top = binary[max(0, y - 1): y + 2, x: x + bw]
+    bottom = binary[max(0, y + bh - 2): y + bh + 1, x: x + bw]
+    left = binary[y: y + bh, max(0, x - 1): x + 2]
+    right = binary[y: y + bh, max(0, x + bw - 2): x + bw + 1]
+    return all(
+        covered(band, axis) >= MARKED_EDGE_COVERAGE
+        for band, axis in ((top, 0), (bottom, 0), (left, 1), (right, 1))
+    )
 
 
 def _alphanumeric(text: str) -> str:
@@ -247,7 +374,7 @@ def _alphanumeric(text: str) -> str:
 
 
 def captions_for_row(
-    row: list[Box], words: list[Word], checkboxes: list[Box]
+    row: list[Box], words: list[Word], checkboxes: list[Box], question: Sequence[Word] = ()
 ) -> list[Word] | None:
     """Name every box in one option row.
 
@@ -256,25 +383,53 @@ def captions_for_row(
     it below. Picking the nearest word per box gets the middle of a row wrong, because a
     neighbouring option's caption is often nearer than the box's own.
 
-    Resolved as a matching instead: a word names at most one box, and the closest pairs are
-    settled first. That needs no decision about the form's convention -- with each word
-    spoken for, the only consistent reading is the correct one. Returns ``None`` if any box
-    goes unnamed.
+    A row's captions are all on one side of their boxes, so the side that names every box
+    closest decides first (``_captions_on_one_side``). Only when no single side names them
+    all is it resolved as a matching: a word names at most one box, and the closest pairs
+    are settled first. Returns ``None`` if any box goes unnamed.
+
+    ``question`` is the row's own label where it is known. Its words never name an option:
+    "Gender [x] Male [ ] Female" sets "Gender" tighter against the first box than "Female"
+    sits against the second, so by distance alone the question was the first caption.
     """
+    asked = {id(word) for word in question}
     reach = max(b.height for b in row) * 4
+    candidates = [
+        word
+        for word in words
+        if id(word) not in asked
+        and _alphanumeric(word.text)
+        # Mostly inside a box, a word is OCR's reading of the box itself. Only partly
+        # inside, it is the box glued to its caption -- "X}M", "ONo" -- and still names it.
+        and not any(_contained_share(_word_box(word), other) > 0.6 for other in checkboxes)
+    ]
+    # A word ending a question -- "Gender:", "Pregnant?" -- labels a row; it never names
+    # one of its boxes, however near the first box it sits. Nor does a rule.
+    eligible = [word for word in candidates if not word.text.rstrip().endswith((":", "?"))]
+    # Except an option with a write-in, "[ ] Other: ______": its caption ends in a colon
+    # and no box follows it, on the option's own line. Tried only where no side names
+    # every box without it, because a prompt inside an option -- "Conization (year: ____)"
+    # -- ends in a colon too, and never below the boxes, where it completed a row with the
+    # patient's name written under it.
+    written_in = [word for word in candidates if not word.text.rstrip().endswith("?") and not _asks_boxes(word, checkboxes)]
+    one_side = _captions_on_one_side(row, eligible, reach) or _captions_on_one_side(
+        row, written_in, reach, sides=("right", "left")
+    )
+    if one_side is not None:
+        return one_side
     pairs = []
     for i, box in enumerate(row):
-        for word in words:
-            if any(_centre_inside(word, other) for other in checkboxes):
-                continue
-            if _span(word.y0, word.y1, box.y0, box.y1) > 0:
+        for word in eligible:
+            if _on_line(word, box):
                 if word.x0 >= box.x1:
                     distance = word.x0 - box.x1
                 elif word.x1 <= box.x0:
                     distance = box.x0 - word.x1
+                elif _glued(word, box):
+                    distance = 0.0
                 else:
                     continue
-            elif 0 <= word.y0 - box.y1 <= reach and _span(word.x0, word.x1, box.x0, box.x1) > 0:
+            elif 0 <= word.y0 - box.y1 <= (box.y1 - box.y0) * BELOW_REACH and _span(word.x0, word.x1, box.x0, box.x1) > 0:
                 distance = word.y0 - box.y1
             else:
                 continue
@@ -292,13 +447,213 @@ def captions_for_row(
     if len(names) != len(row):
         return None
     # A caption is sometimes more than one word -- "Full Time", "Legally Separated" -- and
-    # this only ever returns the single nearest one, so a caption like that reports just
-    # its first word. Widening the seed into its full phrase was tried and reverted: on a
-    # row packed with several questions ("Visually Impaired: Yes No  Hearing Impaired: Yes
-    # No") it had no reliable place to stop, and pulled a field's own label into its
-    # caption on one row while pulling a neighbouring field's text into another. The
-    # single-word result is incomplete but never wrong; the widened one was sometimes both.
+    # this returns the single word that names the box; ``option_phrase`` grows it into the
+    # whole caption when the answer is reported.
     return [names[i] for i in range(len(row))]
+
+
+# A caption printed under its box starts within this many box heights of it.
+BELOW_REACH = 1.0
+
+
+def _captions_on_one_side(
+    row: list[Box], words: list[Word], reach: float, sides: tuple[str, ...] = ("right", "left", "below")
+) -> list[Word] | None:
+    """Name every box from the same side -- right, left or below -- whichever fits closest.
+
+    A form prints all of one question's captions on the same side of their boxes. Matching
+    words to boxes one pair at a time ignores that, and a row such as
+
+        Gender  [x] Male  [ ] Female
+
+    settled its closest pair first: the question "Gender" named the first box, "Female"
+    the second, and the patient's answer was reported as "Gender" (26 ticked answers on
+    the benchmark's ticked copies had a caption from the wrong side). Here each side names
+    each box with its nearest word between the neighbouring boxes, and the side whose
+    captions sit closest in total wins. None when no side names every box.
+    """
+    complete: dict[str, tuple[float, list[Word]]] = {}
+    for side in sides:
+        names: list[Word] = []
+        total = 0.0
+        for i, box in enumerate(row):
+            before = row[i - 1].x1 if i else float("-inf")
+            after = row[i + 1].x0 if i + 1 < len(row) else float("inf")
+            nearest: tuple[float, Word] | None = None
+            for word in words:
+                if side == "below":
+                    if _span(word.x0, word.x1, box.x0, box.x1) <= 0 or _span(word.y0, word.y1, box.y0, box.y1) > 0:
+                        continue
+                    distance = word.y0 - box.y1
+                    # Set directly under its box: further down is the next line's writing
+                    # (a zip code under "Other: [ ]" was its caption, and was cleared).
+                    if distance > (box.y1 - box.y0) * BELOW_REACH:
+                        continue
+                else:
+                    if not _on_line(word, box):
+                        continue
+                    if side == "right":
+                        if word.x1 > after + 1 or (word.x0 < box.x1 and not _glued(word, box, "right")):
+                            continue
+                        distance = max(0.0, word.x0 - box.x1)
+                    else:
+                        if word.x0 < before - 1 or (word.x1 > box.x0 and not _glued(word, box, "left")):
+                            continue
+                        distance = max(0.0, box.x0 - word.x1)
+                if 0 <= distance <= reach and (nearest is None or distance < nearest[0]):
+                    nearest = (distance, word)
+            if nearest is None or any(nearest[1] is n for n in names):
+                break
+            names.append(nearest[1])
+            total += nearest[0]
+        else:
+            complete[side] = (total, names)
+    if not complete:
+        return None
+    # Not the words between the boxes alone: forms space a caption from its own box and
+    # from the next box almost equally ("[ ]Yes[ ]No"), and one clinic sets the caption
+    # further from its box than from the next -- measured, that choice was wrong on nine
+    # benchmark rows the totals read correctly.
+    return min(complete.values(), key=lambda entry: entry[0])[1]
+
+
+def _asks_boxes(word: Word, checkboxes: list[Box]) -> bool:
+    """Whether a word ends a question and tick boxes follow it closely on its line."""
+    if not word.text.rstrip().endswith((":", "?")):
+        return False
+    return any(
+        _on_line(word, box) and 0 <= box.x0 - word.x1 <= LABEL_REACH * (box.x1 - box.x0)
+        for box in checkboxes
+    )
+
+
+def _symbol_glyph(ch: str) -> bool:
+    """A character from the Private Use Area, where symbol fonts put their box glyphs."""
+    return "\ue000" <= ch <= "\uf8ff"
+
+
+def _word_box(word: Word) -> Box:
+    return Box(word.x0, word.y0, word.x1, word.y1)
+
+
+def _on_line(word: Word, box: Box) -> bool:
+    """Whether a word shares a box's line, not merely grazes it from the line above or below."""
+    return _span(word.y0, word.y1, box.y0, box.y1) >= 0.5 * min(word.y1 - word.y0, box.y1 - box.y0)
+
+
+def _glued(word: Word, box: Box, side: str = "") -> bool:
+    """Whether OCR read a box and its caption as one word: the word runs over the box's
+    edge and on past it by half a box on the caption's side, and OCR doubts it.
+
+    Doubt is required for the same reason as when a vetoed box is restored: a letter can
+    pass for a box, and the word around it then runs past it too. Without it the "S" of a
+    state "SD" and a digit of a zip code were boxes whose captions were the whole value,
+    and three answers on the benchmark were cleared as option text. A PDF's text layer is
+    never in doubt, but it does glue a box drawn as a symbol-font glyph to its caption
+    ("\uf071S" for "[ ] S"), and a word that starts or ends with such a glyph is glued.
+    """
+    text = word.text.strip()
+    drawn = bool(text) and (_symbol_glyph(text[0]) or _symbol_glyph(text[-1]))
+    if word.confidence >= GLUED_CONFIDENCE and not drawn:
+        return False
+    reach = 0.5 * (box.x1 - box.x0)
+    right = box.x0 - 2 <= word.x0 < box.x1 and word.x1 >= box.x1 + reach
+    left = box.x0 < word.x1 <= box.x1 + 2 and word.x0 <= box.x0 - reach
+    return right if side == "right" else left if side == "left" else right or left
+
+
+# How far past an option's first word its phrase may continue, in word heights of gap.
+PHRASE_GAP = 1.2
+PHRASE_WORDS = 5
+
+
+def option_phrase(
+    box: Box,
+    name: Word,
+    row: list[Box],
+    words: list[Word],
+    checkboxes: list[Box],
+    image: Path | None = None,
+) -> str:
+    """The whole caption of an option -- "American Indian", "Not Hispanic or Latino" --
+    grown from the single word that names its box.
+
+    Growing a caption was once reverted for having no reliable place to stop on a row
+    packed with several questions. It stops here at everything that ends an option: the
+    next box in either direction, another question's label (a run of words that ends in a
+    colon or a question mark and is followed closely by what it asks is cut off whole, so
+    "No  Hearing Impaired: [ ]" stays "No"), a gap wider than the spacing inside a phrase,
+    the edge of the caption's own line, and five words. A colon followed by an empty
+    write-in belongs to the option instead: "[x] Quit, year: ____" is "Quit, year". Only the
+    reported value grows; which box a word names is decided as before.
+
+    ``image`` is the page OCR read the words from. Where OCR glued the box to its caption
+    ("X}M", "ElRetired"), the caption is read again from the page without the box.
+    """
+    right = (name.x0 + name.x1) / 2 > (box.x0 + box.x1) / 2
+    line = sorted(
+        (w for w in words
+         if _span(w.y0, w.y1, name.y0, name.y1) > 0.5 * (name.y1 - name.y0)
+         and not any(_centre_inside(w, other) for other in checkboxes)),
+        key=lambda w: w.x0,
+    )
+    boxes_on_row = sorted(
+        (b for b in checkboxes if _span(b.y0, b.y1, name.y0, name.y1) > 0), key=lambda b: b.x0
+    )
+    unit = box.x1 - box.x0
+    if right:
+        limit = min((b.x0 for b in boxes_on_row if b.x0 > name.x1), default=float("inf"))
+        run = [name]
+        for w in (w for w in line if w.x0 > name.x0 and w is not name):
+            if w.x1 > limit or w.x0 - run[-1].x1 > PHRASE_GAP * (w.y1 - w.y0) or len(run) >= PHRASE_WORDS:
+                break
+            run.append(w)
+        for i, w in enumerate(run):
+            if not (i and w.text.rstrip().endswith((":", "?"))):
+                continue
+            following = [v.x0 for v in line if v.x0 >= w.x1 - 1 and v is not w] + [
+                b.x0 for b in boxes_on_row if b.x0 >= w.x1 - 1
+            ]
+            # Set at a word space after the option's words and followed by an empty
+            # write-in, the colon asks for detail of this option ("Quit, year: ____"). Set
+            # apart, it is the next question's label ("No    Brand? ____").
+            attached = w.x0 - run[i - 1].x1 <= CAPTION_WORD_GAP * (w.y1 - w.y0)
+            if attached and min(following, default=float("inf")) - w.x1 > LABEL_REACH * unit:
+                run = run[: i + 1]
+                break
+            # Another question's label ends the option before that label begins.
+            start = i
+            while start > 1 and run[start - 1].x1 >= run[start].x0 - PHRASE_GAP * (w.y1 - w.y0) * 0.5:
+                start -= 1
+            run = run[: max(1, start)]
+            break
+    else:
+        limit = max((b.x1 for b in boxes_on_row if b.x1 < name.x0), default=float("-inf"))
+        run = [name]
+        for w in (w for w in reversed(line) if w.x1 < name.x1 and w is not name):
+            if w.x0 < limit or run[0].x0 - w.x1 > PHRASE_GAP * (w.y1 - w.y0) or len(run) >= PHRASE_WORDS:
+                break
+            run.insert(0, w)
+        # Printed before its box, an option can only be preceded by its question: whatever
+        # ends in a colon or question mark ahead of the name is that question.
+        asked = [i for i, w in enumerate(run[:-1]) if w.text.rstrip().endswith((":", "?"))]
+        if asked:
+            run = run[asked[-1] + 1:]
+    # A symbol-font box glued to its caption is not part of the answer.
+    text = "".join(ch for ch in " ".join(w.text for w in run) if not _symbol_glyph(ch)).strip(" :;,")
+    if image is not None and _glued(name, box):
+        x0, x1 = (box.x1 + 1, max(w.x1 for w in run)) if right else (min(w.x0 for w in run), box.x0 - 1)
+        reread = words_in_region(image, (x0, min(w.y0 for w in run), x1, max(w.y1 for w in run)), settings.ocr_language)
+        if reread:
+            text = " ".join(w.text for w in sorted(reread, key=lambda w: w.x0)).strip(" :;,")
+    return text
+
+
+# A question's label is set close before the first thing that answers it: within this many
+# box widths of the next word or box on its line.
+LABEL_REACH = 4.0
+# The words of one caption sit at a word space, no more than this many word heights apart.
+CAPTION_WORD_GAP = 0.6
 
 
 def _iou(a: Box, b: Box) -> float:

@@ -6,12 +6,14 @@ value lands where the blank form actually puts it, independent of capture qualit
 """
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from app.schemas.models import FieldType, TemplateDefinition
+from app.schemas.models import BoundingBox, FieldType, TemplateDefinition
 from app.services import pdf_backend
 from app.services.canonical_registry import CORPUS_KEY_ALIASES
+from app.services.field_layout import Box, detect_checkboxes
 from app.services.templates import canonical_image_path
 
 # Checkbox glyph drawn when a value is truthy; signature fields are presence-only and are
@@ -132,13 +134,19 @@ def unplaced(
 
 
 def regenerate(
-    template: TemplateDefinition, values: dict[str, Any], page_index: int = 0
+    template: TemplateDefinition,
+    values: dict[str, Any],
+    page_index: int = 0,
+    ticks: Sequence[BoundingBox] = (),
 ) -> bytes:
     """Render ``values`` onto the blank master for ``template`` and return PDF bytes.
 
     ``values`` is keyed by canonical field key; template fields carry the corpus key, so
     they are translated through CORPUS_KEY_ALIASES on the way in. Values with no slot are
     not rendered; ``unplaced`` names them so a caller can say so.
+
+    ``ticks`` are the boxes a patient ticked, as page fractions (``DetectedFormField.
+    ticked_boxes``); each is marked with an X in the box the blank prints there.
     """
     blank = canonical_image_path(template.template_id, page_index)
     if not blank.exists():
@@ -172,7 +180,55 @@ def regenerate(
         texts.append(
             pdf_backend.Text(x0 + _indent(field, size, width), y1 - drawn * _descent(FONT), text, drawn)
         )
+    texts += _tick_marks(blank, ticks, width, height)
     return pdf_backend.compose(blank, width, height, texts, boxes, fontname=FONT, color=INK)
+
+
+# An X fills most of the box it marks, and a recorded tick is matched to a box on the blank
+# only within this many of its own sizes, centre to centre.
+TICK_FILL = 0.9
+TICK_SNAP = 1.0
+
+
+def _tick_marks(
+    blank: Path, ticks: Sequence[BoundingBox], width: float, height: float
+) -> list[pdf_backend.Text]:
+    """An X in each ticked box, drawn where the blank prints that box.
+
+    A choice used to be regenerated as its caption written into whatever text region its
+    question matched -- "Male" typed beside or across the row of boxes, with every box left
+    empty, which is not how the form was answered. A tick is recorded where the reader
+    found it; it is drawn in the blank's own box nearest that place, and not at all if the
+    blank has no box there, since an X somewhere else would be a wrong answer.
+    """
+    if not ticks:
+        return []
+    from PIL import Image
+
+    pixels_wide, pixels_high = Image.open(blank).size
+    sx, sy = width / pixels_wide, height / pixels_high
+    printed = [
+        Box(b.x0 * sx, b.y0 * sy, b.x1 * sx, b.y1 * sy) for b in detect_checkboxes(blank)
+    ]
+    marks = []
+    for tick in ticks:
+        cx, cy = (tick.x + tick.width / 2) * width, (tick.y + tick.height / 2) * height
+        reach = TICK_SNAP * max(tick.width * width, tick.height * height)
+        near = [
+            b for b in printed
+            if abs((b.x0 + b.x1) / 2 - cx) <= reach and abs((b.y0 + b.y1) / 2 - cy) <= reach
+        ]
+        if not near:
+            continue
+        box = min(near, key=lambda b: ((b.x0 + b.x1) / 2 - cx) ** 2 + ((b.y0 + b.y1) / 2 - cy) ** 2)
+        size = (box.y1 - box.y0) * TICK_FILL
+        across = pdf_backend.text_length("X", FONT, size)
+        # A capital sits about two thirds of an em above its baseline; centring that
+        # height on the box's centre puts the baseline a third of an em below it.
+        marks.append(
+            pdf_backend.Text((box.x0 + box.x1 - across) / 2, (box.y0 + box.y1) / 2 + size / 3, "X", size)
+        )
+    return marks
 
 
 def label_key(label: str) -> str:
@@ -204,7 +260,13 @@ def values_from_analysis(analysis, template=None, page_index: int = 0) -> dict[s
     templates, whose ids are canonical rather than derived.
     """
     values: dict[str, Any] = {}
-    filled = [f for f in analysis.detected_fields if f.normalized_value not in (None, "")]
+    # A choice whose ticks were located is regenerated as those ticks (``ticked_boxes``),
+    # not as its caption written into a text region. Once a reviewer changes its value the
+    # located ticks no longer say what was chosen, and the corrected text is written.
+    filled = [
+        f for f in analysis.detected_fields
+        if f.normalized_value not in (None, "") and not drawn_as_ticks(f)
+    ]
     claimed: set[int] = set()
 
     if template is not None:
@@ -234,6 +296,25 @@ def values_from_analysis(analysis, template=None, page_index: int = 0) -> dict[s
         if field.canonical_key:
             values.setdefault(field.canonical_key, field.normalized_value)
     return values
+
+
+def drawn_as_ticks(field) -> bool:
+    """Whether a field is regenerated by marking the boxes it ticked."""
+    return (
+        getattr(field, "field_type", None) == FieldType.MULTIPLE_CHOICE
+        and bool(getattr(field, "ticked_boxes", None))
+        and not getattr(field, "history", None)
+    )
+
+
+def ticks_from_analysis(analysis, page_index: int = 0) -> list[BoundingBox]:
+    """The ticked boxes on one page of an analysis, for ``regenerate``."""
+    return [
+        box
+        for field in analysis.detected_fields
+        if field.page_index == page_index and drawn_as_ticks(field)
+        for box in field.ticked_boxes
+    ]
 
 
 # A value must sit substantially inside the slot it fills; a value merely adjacent to one

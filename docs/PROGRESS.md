@@ -3070,3 +3070,179 @@ corrected copy without the model 92.0 / 89.1; no blank anywhere 88.7 / 88.6 (rec
 against the same row without the rule: a template derived from a filled copy records that
 patient's answers as printing, as expected). No artefact on the benchmark lost a correct
 field to either version.
+
+### Marks over printed text, a crash, and a contaminated run (2026-09-16, late)
+
+**A mark measured over printed text says nothing.** Nine false "signed"/"ticked" values on
+the benchmark sat on regions the blank fills with printed words (a consent paragraph bound
+to "Signature"). A tick box holds no printed words and a signature box a caption at most;
+a region the blank prints four or more words inside now has its mark cleared. Benchmark
+precision 93.8 -> 94.1 (photographs 90.0), unseen full system 89.6 -> **90.0** (412 of
+458), recall unchanged on both.
+
+**PDFium is not thread-safe.** A measurement server died on its first request with a
+segmentation fault: the API analyses uploads on a thread pool and two renders ran at once.
+Reproduced with 96 renders on eight threads ("Failed to load document", or a crash);
+clean with every render behind one lock (`pdf_backend._PDFIUM`). The "server lost mid-run
+for no error the log shows" the day before was this.
+
+**A contaminated unseen run, caught.** A re-run read recall 86.7 instead of 93.3, the whole
+drop on one form. The server stopped for the restart was still finishing a template and
+wrote it into the freshly emptied folder; the run scored with that stray template
+registered (`templates before ['T59']`, printed and ignored). Both scorers now refuse to
+score on a non-empty registry, and restarts wait for the old server to exit before the
+folder is emptied. The clean re-run is the 90.0 above; the 86.7 is discarded.
+
+**A new locked set with no blank at all** (`UNSEEN2`, `UNSEEN2_B`): ten packets from
+clinics never used before, filled with `fill_forms.py --thorough` by two patients (407 and
+408 truth fields, 20 artefacts each; 20 of 406 answers coincide). Each set holds patient
+A's filled copy where the blank would be; the blanks are locked in
+`LOCKED/UNSEEN2_blanks/` and nothing reads them. Measured after the no-blank fix below is
+settled on the benchmark.
+
+Measured 2026-09-17 on commit 584ad60 (a worktree, so no later change leaks in), scored
+on `UNSEEN2_B` after the three forms the user opened in the UI were swapped out (397
+truth fields), totals only, no errors, refusals or timeouts:
+
+| row | recall | precision |
+|---|---|---|
+| OCR only, no template | 54.9% | 84.2% |
+| OCR + page vision (`qwen2.5vl:7b`) | 70.0% | 63.2% |
+| template learned from patient A's filled copy, nothing corrected | 48.4% | 97.8% |
+| + one corrected copy (patient A's), no model | 87.7% | 97.8% |
+| **+ the slot reader (full system)** | **91.9%** | **98.9%** |
+
+PDFs 90.5 / 99.0 and photographs 94.0 / 98.8 in the full system. With no blank anywhere
+the corrected track still clears 90. Two things not explained, and not to be examined on
+this set (it is locked; reproduce on LARGE_SELF first): precision is higher here than on
+UNSEEN with a blank (93.3 / 90.0), and the uncorrected template row reads less than OCR
+alone.
+
+## 2026-09-16 (night) — Regeneration lettering, and tick boxes measured for the first time
+
+**Regenerated values are now green serif.** The user could not tell a regenerated value
+from one carried over from the uploaded page, because both were in similar sans-serif
+lettering. Values are drawn in Times, green, at the size that gives each Helvetica's width
+(sizes and indents are measured in Helvetica, so spans and placement hold: 78.9% within
+2mm). Slanted Helvetica was tried and OCR misread it on the round trip; Courier needed a
+size too small to read. The fallback size's 6-12 bounds now scale with the page's units
+-- on a template learned from a 2x render they printed about 3-6 points. Round trip 14/23
+(was 15/23), 3 of 3 layouts keep at least half their values (was 2).
+
+**Tick boxes had never been scored.** The filler wrote a choice as text beside its
+options, so no benchmark form carried a ticked box, and the user's upload showed false
+ticks and captions read as answers. `fill_forms.py --tick` now answers boxed choice
+questions the way a patient does: boxes are found on the blank's own text and drawing
+layers (symbol-font glyphs located from their rendered ink, stroked squares, checkbox
+widgets), a question counts only if its caption ends in ":" or "?" or names a known choice,
+and an X is drawn inside the chosen box with no text. `LARGE_TICK` and `LARGE_TICK_B` are
+LARGE's blanks filled that way by two patients: 417 ticked questions each (268 in PDFs,
+149 in photos) on 40 forms. `scripts/evaluate_ticks.py` scores them from a dump.
+
+Baseline, no template: **5.4%** of ticked questions read exactly, 80% not read at all.
+Four defects, each general, found by tracing rows through the reader on the benchmark:
+
+1. `_blank_option_captions` and `_blank_furniture` cleared resolved tick answers, because
+   a tick's value is an option caption -- the text they exist to clear.
+2. A question's own label ("Gender:") could be matched as an option's caption.
+3. Captions were single words ("American" for "American Indian").
+4. Two questions on one line were split only at a colon, not at a question mark.
+
+With those fixed (and a PDF's text layer no longer overruling ink that shows a vector X):
+21.3% read exactly. The next loss was detection: a small box with an X in it is no
+longer a clean four-cornered outline, so 41 of 233 ticked boxes on PDFs were never
+found. A second detection pass keeps only horizontal and vertical strokes, finds the
+outline again, and accepts a box only if all four sides are drawn, it carries a mark, and
+an unmarked box of its size sits in the same row or column (untouched blanks: 14 extra
+boxes in 3,853). Tracing it also exposed a filler bug: glyph boxes' squares were guessed
+inside the character cell and the X landed half outside them; they are now located from
+the rendered ink and the X's stroke scales with the box. Sets rebuilt; measurement below.
+
+**Measuring it honestly first.** Two defects in the measurement itself, fixed before any
+number below:
+
+- *The scorer undercounted.* The filler records a long question by its last six words
+  ("you ever had abnormal pap smears?") while the reader reports the whole question, so a
+  correct tick counted as unread and as a false mark at once. `evaluate_ticks.py` now
+  takes a label that ends the question (or the other way round) as the same question,
+  word by word or on letters alone. Same run, old scorer 30.5% read and 74 false marks;
+  new scorer 39.3% and 27.
+- *24 of 268 PDF ticks were invisible.* The filler drew each X before flattening the
+  form's widgets, and where a widget covers its printed box the flattened appearance
+  painted over the X. Ticks are drawn after flattening now (`draw_ticks`); both tick sets
+  were rebuilt, truth byte-identical, every tick checked for ink.
+
+**Where ticks were lost, traced one question at a time** (a tracer that re-runs the page
+and follows each ticked box through detection, row, question, captions and marks), and
+what fixed each -- every rule general, none about a form:
+
+1. *Question in a table cell* (96 ticks): candidate labels are the words no drawn region
+   holds, so "Is your current condition due to an accident?" inside a cell was invisible.
+   A same-line run ending ":" or "?" is now looked for among all words.
+2. *A neighbour's region claimed the row* (25): "Social Security #: ____ Sex: [ ] M [ ] F"
+   -- the SSN field's region runs to the page edge and took the Sex boxes. Boxes with a
+   question of their own on their line are left to be read under it.
+3. *Captions from the wrong side* (33): "Gender [x] Male [ ] Female" set "Gender" closer to
+   the first box than "Female" to the second. All captions on one side, closest complete
+   side, and the question's own words never name an option. (Deciding the side from the
+   gaps between boxes instead was tried and reverted: forms space a caption from its box
+   and from the next box almost equally, and it broke nine rows the totals read.)
+4. *Rows split into single boxes* (29): any word ending ":" or "?" between two boxes split
+   them, including "[ ] Yes - How many/day? [ ] No" and a word from the next line beside
+   tall boxes. A divider must sit on the row, be followed closely by what it asks, and not
+   continue the previous box's caption.
+5. *Glued OCR* (photos): OCR reads a marked box and its caption as one word ("mMale",
+   "ElRetired", "X}M"), and the box inside that word was vetoed like a stray glyph.
+   Restoring every square inside a word also restored bold "B"/"D" capitals (census of 40
+   photographs: 86 candidates, 10 of 24 sampled were letters). Restored only when OCR
+   doubts the word (confidence under 0.7; 25 of 29 glued words were, nearly every clean
+   word is above 0.85) and a real box of its size sits level with it. A first version
+   without the confidence test restored the "O" of "DOB:" beside two real boxes and
+   blanked six text fields on the tick set; with it, all six came back. Glued captions
+   are also accepted as captions under the same doubt, and the chosen one is re-read from
+   the page without the box. (Accepted without doubt, the "S" of a state "SD" named itself
+   and the value was cleared as option text: two States on the benchmark. Required
+   everywhere, it broke a PDF whose text layer glues its symbol-font boxes to their
+   captions, "S": a word with such a glyph at its edge is glued whatever the
+   confidence.)
+6. *A colon inside an option* ("[x] Quit, year: ____") cut the value to "Quit"; one set at
+   a word space and followed by an empty write-in is part of the option now, one set apart
+   ("No    Brand? ____") is still the next question.
+7. *A caption far below a box*: a lone "Other: [ ]" box, its colon caption excluded as a
+   question, took the zip code on the next line as its caption and cleared it. A caption
+   under a box now starts within one box height of it.
+8. *False marks from a font* (untouched benchmark): symbol-font boxes counted as ticked
+   whenever a character from another text block overlapped them, and Cambria's descriptor
+   claims 3.1 em up and 2.5 em down, so its captions were 61 points tall at 11 points and
+   30 of one form's 40 boxes read as ticked. Overlap is measured on glyph-sized boxes; a
+   stamped X over a box glyph still reads as ticked (checked on a synthetic PDF).
+
+**Result** (no template, no model), same rebuilt set, committed code against this:
+
+| no template, no model | committed code | this change |
+|---|---|---|
+| ticks read exactly (of 417) | 10.1% | **75.5%** |
+| PDFs / photographs | 11.2% / 8.1% | **79.5% / 68.5%** |
+| wrong option or text | 8.4% | 5.3% |
+| right option plus others | 8.2% | 4.1% |
+| not read | 73.4% | 15.1% |
+| choice values under questions nobody ticked | 8 | 19 |
+| tick set, every field: recall / precision | 58.3 / 78.7 | 64.6 / 81.7 |
+| LARGE zero-shot (no ticks): recall / precision | 67.1 / 76.8 | **67.4 / 78.2** |
+| choice values on untouched LARGE forms | 19 | 13 |
+| LARGE_B corrected track, no model | 91.2 / 94.1 | **91.3 / 94.5** |
+
+On LARGE zero-shot seven fields are gained and none lost. On the tick set one field
+committed code read is lost: a marital status written as text beside its boxes now reads
+as the ticked box's caption. The false-mark count rose from 8 because committed code read
+almost no ticks at all. Listed, most of the 19 are a real tick reported under the wrong
+question -- a neighbouring caption ("Social Security Number" for a Sex row), OCR's "SX", a
+label from the next line or the other column -- and a few, mostly on one form, are values
+under rows nobody ticked. The wrong-question cases are the next thing to fix.
+
+**Regenerated ticks.** A choice was regenerated as its caption typed into whatever text
+region its question matched, with every box left empty. The analysis now records where
+each tick is (`DetectedFormField.ticked_boxes`), and regeneration draws a green X in the
+blank's own box nearest that place (`_tick_marks`), or nothing if the blank prints no box
+there; a value a reviewer edited goes back to text. Checked on a regenerated packet: X in
+Male, Divorced and No, the boxes the patient ticked.

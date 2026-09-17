@@ -15,7 +15,12 @@ from app.services import audit_store
 from app.services.capture import new_run_dir, preprocess, save_upload
 from app.services.fhir import to_questionnaire_response
 from app.services.form_analyzer import FormAnalyzer
-from app.services.regeneration import regenerate, unplaced, values_from_analysis
+from app.services.regeneration import (
+    regenerate,
+    ticks_from_analysis,
+    unplaced,
+    values_from_analysis,
+)
 from app.services.template_builder import derive_template, learn_corrections
 from app.services.templates import registry
 
@@ -560,7 +565,7 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
 
     resolved = values_from_analysis(analysis, template)
     try:
-        pdf = regenerate(template, resolved)
+        pdf = regenerate(template, resolved, ticks=ticks_from_analysis(analysis))
     except FileNotFoundError as exc:
         raise HTTPException(422, str(exc)) from exc
 
