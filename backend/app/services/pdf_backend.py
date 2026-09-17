@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
@@ -78,6 +79,8 @@ BLOCK_GAP = 1.5
 
 _SUBSET = re.compile(r"^[A-Z]{6}\+")
 _CID = re.compile(r"^\(cid:\d+\)$")
+# PDFium keeps global state; every call into it holds this.
+_PDFIUM = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -402,14 +405,20 @@ class Page:
     # -- rendering ---------------------------------------------------------------------
 
     def render(self, scale: float, out_path: Path) -> None:
-        """Render the page at ``scale`` times 72 dpi to a PNG, form fields drawn."""
-        document = pdfium.PdfDocument(str(self.path))
-        try:
-            document.init_forms()
-            image = document[self.index].render(scale=scale, may_draw_forms=True).to_pil()
-            image.convert("RGB").save(out_path)
-        finally:
-            document.close()
+        """Render the page at ``scale`` times 72 dpi to a PNG, form fields drawn.
+
+        PDFium is not thread-safe, and the API analyses uploads on a thread pool: two
+        renders at once crashed the server with a segmentation fault (2026-09-16), taking
+        every request in flight with it. One render at a time.
+        """
+        with _PDFIUM:
+            document = pdfium.PdfDocument(str(self.path))
+            try:
+                document.init_forms()
+                image = document[self.index].render(scale=scale, may_draw_forms=True).to_pil()
+            finally:
+                document.close()
+        image.convert("RGB").save(out_path)
 
 
 def open_page(pdf: Path, index: int = 0) -> Page:
