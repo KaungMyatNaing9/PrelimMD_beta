@@ -428,3 +428,17 @@ class TestBlankPrinting:
         _blank_printing([married, written], layer, words, 1000, 1000)
         assert married.normalized_value == "Married"
         assert written.normalized_value is None
+
+    def test_a_mark_measured_over_printed_text_says_nothing(self):
+        from app.schemas.models import FieldType
+        from app.services.form_analyzer import _blank_printing
+
+        consent = _field("Signature", True, 0.1, 0.8, w=0.6, h=0.05)
+        consent.field_type = FieldType.SIGNATURE_PRESENCE
+        tick = _field("Consent", True, 0.1, 0.2, w=0.02, h=0.015)
+        tick.field_type = FieldType.CHECKBOX
+        layer = [("i hereby authorize the release", 0.3, 0.82), ("of my records", 0.5, 0.83), ("consent", 0.2, 0.19)]
+        _blank_printing([consent, tick], layer, [], 1000, 1000)
+        assert consent.normalized_value is None
+        assert tick.normalized_value is True
+

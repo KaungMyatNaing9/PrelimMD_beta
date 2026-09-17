@@ -2378,16 +2378,38 @@ def _blank_printing(
         if _tokens(z.text)
     ]
     for field in fields:
-        if field.source == "reviewer" or field.field_type in (FieldType.MULTIPLE_CHOICE, *MARK_TYPES):
+        if field.source == "reviewer" or field.field_type == FieldType.MULTIPLE_CHOICE:
+            continue
+        box = field.answer_bbox
+        if field.field_type in MARK_TYPES:
+            # A tick or a signature is ink the blank does not have. Measured over a
+            # region the blank fills with printed words -- a consent paragraph bound to
+            # "Signature" -- the ink is that printing, and "signed" says nothing.
+            if field.normalized_value and _printed_word_count(layer, box) >= MARK_PRINTED_WORDS:
+                field.raw_value = None
+                field.normalized_value = None
+                field.is_blank = True
             continue
         value = field.normalized_value
         if not isinstance(value, str) or not value.strip():
             continue
-        box = field.answer_bbox
         if _is_printing(value, _tokens_near(page, box), _tokens_near(layer, box)):
             field.raw_value = None
             field.normalized_value = None
             field.is_blank = True
+
+
+# A tick box holds no printed words and a signature box a caption at most; a region the
+# blank prints this many words inside is a block of text, not somewhere to mark.
+MARK_PRINTED_WORDS = 4
+
+
+def _printed_word_count(layer: list[tuple[str, float, float]], box: BoundingBox) -> int:
+    return sum(
+        len(text.split())
+        for text, cx, cy in layer
+        if box.x <= cx <= box.x + box.width and box.y <= cy <= box.y + box.height
+    )
 
 
 def _tokens_near(items: list[tuple[str, float, float]], box: BoundingBox) -> list[str]:
