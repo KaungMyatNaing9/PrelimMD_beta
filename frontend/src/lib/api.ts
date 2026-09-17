@@ -1,7 +1,9 @@
 const BASE=process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export const imageUrl=(path:string)=>`${BASE}${path}`;
 export const regenerateUrl=(id:string)=>`${BASE}/api/v1/form-analyses/${id}/regenerate`;
-export async function deriveTemplate(id:string){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/derive-template`,{method:"POST"});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{template_id:string;field_count:number}>}
+// A blank form is kept exactly as uploaded for the template's master; a filled one has the
+// answers read on it lifted off the page instead.
+export async function deriveTemplate(id:string,blank=false){const r=await fetch(`${BASE}/api/v1/form-analyses/${id}/derive-template${blank?"?blank=true":""}`,{method:"POST"});if(!r.ok)throw new Error(await r.text());return r.json() as Promise<{template_id:string;field_count:number}>}
 export async function analyze(files:File|File[]){const body=new FormData();const list=Array.isArray(files)?files:[files];
 // One page per file when a form was photographed a page at a time; the single-file field
 // stays for PDFs and for anything already calling this.

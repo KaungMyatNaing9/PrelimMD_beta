@@ -5,40 +5,135 @@ import pytest
 
 from app.schemas.models import BoundingBox
 from app.services.regeneration import label_key, values_from_analysis
-from app.services.template_builder import _slug, blank_from_filled
+from app.services.template_builder import _slug, answer_ink, master_from_page
 
 
-def test_value_pixels_are_erased_but_the_rule_line_survives():
-    page = np.full((1000, 1000, 3), 255, dtype=np.uint8)
-    # A box outline at 100..300, with "value" ink filling its interior.
-    page[100, 100:300] = page[300, 100:300] = 0
-    page[100:300, 100] = page[100:300, 300] = 0
-    page[150:250, 150:250] = 0
-
-    blank = blank_from_filled(page, [BoundingBox(x=0.1, y=0.1, width=0.2, height=0.2)])
-
-    assert (blank[200, 200] == 255).all(), "interior ink should be erased"
-    assert (blank[100, 200] == 0).all(), "the box's own rule line must survive"
+def _page(shade: int = 255) -> np.ndarray:
+    return np.full((400, 600, 3), shade, dtype=np.uint8)
 
 
-def test_ink_flush_against_the_top_edge_is_still_erased():
-    """Values sit at the top of tall fields; a size-scaled inset used to spare them."""
-    page = np.full((1000, 1000, 3), 255, dtype=np.uint8)
-    page[105:130, 150:400] = 0  # text just inside a tall box starting at y=100
+def test_an_answer_is_lifted_and_the_rule_under_it_survives():
+    page = _page()
+    page[200:202, 50:550] = 0  # a rule
+    page[170:200, 100:160] = 0  # an answer written on it, touching the rule
 
-    # A plausible multi-line field: wide, but not so tall it becomes a section frame.
-    blank = blank_from_filled(page, [BoundingBox(x=0.1, y=0.1, width=0.6, height=0.15)])
+    master = master_from_page(page, [(100, 170, 160, 200)])
 
-    assert blank[105:130, 150:400].all(), "text near the top edge should be gone"
+    assert (master[175:195, 105:155] > 200).all(), "the answer is lifted"
+    assert (master[200:202, 60:540] == 0).all(), "the rule is kept, pixel for pixel"
 
 
-def test_erasing_leaves_content_outside_the_box_untouched():
-    page = np.full((1000, 1000, 3), 255, dtype=np.uint8)
-    page[50:70, 100:300] = 0  # a label above the box
+def test_a_tinted_panel_stays_tinted_where_an_answer_was_lifted():
+    page = _page(shade=225)
+    page[170:200, 100:160] = 30
 
-    blank = blank_from_filled(page, [BoundingBox(x=0.1, y=0.1, width=0.2, height=0.2)])
+    master = master_from_page(page, [(100, 170, 160, 200)])
 
-    assert (blank[50:70, 100:300] == 0).all(), "labels are template, not values"
+    lifted = master[175:195, 105:155].astype(int)
+    assert (abs(lifted - 225) <= 12).all(), "filled from the panel around it, not painted white"
+
+
+def test_everything_but_the_answers_is_left_as_it_was():
+    page = _page()
+    page[40:60, 100:300] = 0  # a caption
+    page[170:200, 100:160] = 0  # an answer
+
+    master = master_from_page(page, [(100, 170, 160, 200)])
+
+    assert (master[40:60, 100:300] == 0).all()
+
+
+def test_a_blank_form_is_its_own_master():
+    page = _page()
+    page[40:60, 100:300] = 0
+
+    assert (master_from_page(page, [], []) == page).all()
+
+
+def test_a_ticked_box_loses_its_mark_and_keeps_its_outline():
+    page = _page()
+    page[100, 100:140] = page[139, 100:140] = 0
+    page[100:140, 100] = page[100:140, 139] = 0
+    for i in range(10, 30):  # an X inside
+        page[100 + i, 100 + i] = page[100 + i, 139 - i] = 0
+
+    master = master_from_page(page, [], [(100, 100, 140, 140)])
+
+    assert (master[112:128, 112:128] > 200).all(), "the mark is lifted"
+    assert (master[100, 105:135] == 0).all() and (master[105:135, 100] == 0).all(), "the box stays"
+
+
+def test_a_stroke_reaching_past_its_word_box_goes_with_the_answer():
+    page = _page()
+    page[200:202, 50:550] = 0  # the rule
+    page[172:198, 120:122] = 0  # a stroke of the answer
+    for i in range(14):  # ...curling down and left, past the box OCR drew round the word
+        page[182 + i // 2: 184 + i // 2, 106 + i: 108 + i] = 0
+
+    master = master_from_page(page, [(114, 170, 160, 200)])
+
+    assert (master[182:190, 106:113] > 200).all(), "the part outside the word box is lifted too"
+    assert (master[200:202, 60:540] == 0).all()
+
+
+def test_a_short_rule_under_an_answer_survives():
+    page = _page()
+    page[200:202, 100:280] = 0  # a rule just long enough for the answer written on it
+    for x in range(105, 275, 12):  # glyphs standing on it
+        page[176:200, x:x + 3] = 0
+
+    master = master_from_page(page, [(100, 174, 280, 200)])
+
+    assert (master[180:195, 106:108] > 200).all(), "the answer is lifted"
+    assert (master[200:202, 100:280] == 0).all(), "a rule longer than any stroke is kept"
+
+
+def test_option_captions_beside_a_box_are_not_an_answer():
+    from app.schemas.form_understanding import DetectedFormField
+    from app.services.field_layout import Box
+    from app.services.word_source import Word
+
+    words = [
+        Word(120, 100, 180, 120, "MtoF", 1, 0.4),  # a caption OCR glued, read as a value
+        Word(300, 200, 420, 220, "Hollingsworth", 1, 0.9),
+    ]
+    boxes = [Box(100, 100, 118, 118), Box(200, 100, 218, 118)]
+
+    def field(label, value, x, y, w, h):
+        return DetectedFormField(
+            field_id=label, page_index=0, label_text=label, normalized_label=label,
+            field_type="short_text", label_bbox=BoundingBox(x=0, y=0, width=0.01, height=0.01),
+            answer_bbox=BoundingBox(x=x, y=y, width=w, height=h), required_confidence=0.3,
+            detection_confidence=0.9, source="ocr_layout", mapping_confidence=0.5,
+            mapping_reason="", raw_value=value, normalized_value=value, is_blank=False,
+        )
+
+    fields = [field("Transgender", "MtoF", 0.2, 0.25, 0.1, 0.05), field("Name", "Hollingsworth", 0.5, 0.5, 0.2, 0.05)]
+    inked, _ = answer_ink(fields, words, 600, 400, boxes)
+
+    assert inked == [(300, 200, 420, 220)]
+
+
+def test_a_text_value_read_across_a_row_of_tick_boxes_is_not_lifted():
+    from app.schemas.form_understanding import DetectedFormField
+    from app.services.field_layout import Box
+    from app.services.word_source import Word
+
+    # "Gender: M [ ]   F [ ]" read as the text "Mo F o": the F sits well clear of its box.
+    words = [Word(100, 100, 112, 116, "Mo", 1, 0.5), Word(200, 100, 210, 116, "F", 1, 0.9)]
+    boxes = [Box(118, 102, 128, 112), Box(240, 102, 250, 112)]
+    gender = DetectedFormField(
+        field_id="g", page_index=0, label_text="Gender", normalized_label="gender",
+        field_type="short_text", label_bbox=BoundingBox(x=0, y=0, width=0.01, height=0.01),
+        answer_bbox=BoundingBox(x=100 / 600, y=100 / 400, width=150 / 600, height=16 / 400),
+        required_confidence=0.3, detection_confidence=0.9, source="ocr_layout",
+        mapping_confidence=0.5, mapping_reason="", raw_value="Mo F o", normalized_value="Mo F o",
+        is_blank=False,
+    )
+
+    inked, _ = answer_ink([gender], words, 600, 400, boxes)
+
+    assert inked == []
 
 
 @pytest.mark.parametrize(

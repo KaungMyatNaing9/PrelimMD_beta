@@ -16,6 +16,7 @@ from app.services.capture import new_run_dir, preprocess, save_upload
 from app.services.fhir import to_questionnaire_response
 from app.services.form_analyzer import FormAnalyzer
 from app.services.regeneration import (
+    loose_values,
     regenerate,
     ticks_from_analysis,
     unplaced,
@@ -497,15 +498,21 @@ def release_template(template_id: str):
 
 
 @app.post("/api/v1/form-analyses/{analysis_id}/derive-template", status_code=201)
-def derive_template_from_analysis(analysis_id: str, template_name: str | None = None):
-    """Learn a reusable blank template from a form no registered template matched."""
+def derive_template_from_analysis(
+    analysis_id: str, template_name: str | None = None, blank: bool = False
+):
+    """Learn a reusable blank template from a form no registered template matched.
+
+    ``blank=true`` says the upload is a blank form, kept exactly as uploaded for its master;
+    otherwise the answers read on it are lifted off the page to make one.
+    """
     folder = run_dir(analysis_id)
     analysis = get_form_analysis(analysis_id)
     page_image = folder / "normalized_color.png"
     if not page_image.exists():
         raise HTTPException(422, "No normalized page image for this analysis")
     try:
-        definition = derive_template(analysis, page_image, template_name)
+        definition = derive_template(analysis, page_image, template_name, blank=blank)
     except ValueError as exc:
         raise HTTPException(
             422, detail={"code": "TEMPLATE_NOT_DERIVABLE", "message": str(exc)}
@@ -564,8 +571,11 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
         raise HTTPException(404, f"Unknown template {chosen}") from exc
 
     resolved = values_from_analysis(analysis, template)
+    # A template learned from this very upload shares its page, so a value no slot took is
+    # drawn where it was read rather than left off the copy.
+    loose = loose_values(analysis, template) if template.derived_from == analysis.analysis_id else []
     try:
-        pdf = regenerate(template, resolved, ticks=ticks_from_analysis(analysis))
+        pdf = regenerate(template, resolved, ticks=ticks_from_analysis(analysis), loose=loose)
     except FileNotFoundError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -573,7 +583,8 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
     # correctly and still have nowhere to go -- a form captioning one region "City/State"
     # leaves a correctly read city unplaceable. Saying which values did not make it turns a
     # silently shorter form into a known one.
-    missing = unplaced(template, resolved)
+    drawn = {key for _, _, keys in loose for key in keys}
+    missing = [key for key in unplaced(template, resolved) if key not in drawn]
     return Response(
         pdf,
         media_type="application/pdf",

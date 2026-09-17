@@ -189,3 +189,37 @@ def test_a_value_with_nowhere_to_go_is_named_rather_than_dropped():
         "patient.home_phone": "( )",         # an empty rule, not an answer
     })
     assert missing == ["patient.city"]
+
+
+def test_a_value_without_a_slot_is_drawn_only_where_its_ink_was_lifted():
+    from app.schemas.form_understanding import DetectedFormField
+    from app.schemas.models import BoundingBox, TemplateDefinition, TemplatePage
+    from app.services.regeneration import loose_values
+
+    def field(label, value, y):
+        return DetectedFormField(
+            field_id=label, page_index=0, label_text=label, normalized_label=label,
+            field_type="short_text", label_bbox=BoundingBox(x=0.05, y=y, width=0.1, height=0.02),
+            answer_bbox=BoundingBox(x=0.2, y=y, width=0.3, height=0.02), required_confidence=0.3,
+            detection_confidence=0.9, source="ocr_layout", mapping_confidence=0.5,
+            mapping_reason="", raw_value=value, normalized_value=value, is_blank=False,
+        )
+
+    class Analysis:
+        analysis_id = "run_x"
+
+        def __init__(self):
+            self.detected_fields = [
+                field("Patient Name", "Ezekiel B Hollingsworth", 0.2),
+                field("Transgender", "MtoF LIF", 0.4),
+            ]
+
+    template = TemplateDefinition(
+        template_id="T50", template_name="t", version=1, page_count=1, derived_from="run_x",
+        pages=[TemplatePage(page_index=0, canonical_width=100, canonical_height=100, fields=[],
+                            lifted=[BoundingBox(x=0.25, y=0.2, width=0.1, height=0.02)])],
+    )
+
+    drawn = loose_values(Analysis(), template)
+
+    assert [text for _, text, _ in drawn] == ["Ezekiel B Hollingsworth"]

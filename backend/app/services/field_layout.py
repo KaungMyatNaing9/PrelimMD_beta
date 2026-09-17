@@ -252,7 +252,7 @@ def detect_checkboxes(image_path: Path, words: list[Word] | None = None) -> list
         # nearly every clean word), and a box has company: another box of its size level
         # with it on the row. A PDF's text layer is exact and never restores anything.
         real = _deduplicated(kept)
-        found = kept + [b for b in doubted if _level_sibling(b, real)]
+        found = kept + [b for b in doubted if level_sibling(b, real)]
 
     return _deduplicated(found)
 
@@ -340,7 +340,7 @@ def _has_sibling(box: Box, boxes: list[Box]) -> bool:
     return False
 
 
-def _level_sibling(box: Box, boxes: list[Box]) -> bool:
+def level_sibling(box: Box, boxes: list[Box]) -> bool:
     """Whether another box of this size sits level with it on its row."""
     for other in boxes:
         if not (0.8 <= other.width / box.width <= 1.25 and 0.8 <= other.height / box.height <= 1.25):

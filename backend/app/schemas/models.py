@@ -103,6 +103,11 @@ class TemplatePage(BaseModel):
     # of 731 junk values on the benchmark's corrected track were exactly that
     # (2026-09-16). Empty on templates learned before it existed.
     printed_words: list[tuple[str, float, float]] = Field(default_factory=list)
+    # Where a patient's answers were lifted off this page to make its master, as page
+    # fractions: only on a template learned from a filled copy. A value no slot takes is
+    # regenerated where it was read only if its ink was lifted there; otherwise the reader's
+    # "value" is still printed on the master, and drawing it again would write over it.
+    lifted: list[BoundingBox] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def unique_fields(self):

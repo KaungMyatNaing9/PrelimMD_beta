@@ -101,7 +101,7 @@ def main() -> int:
         derived = json.loads(
             curl("-X", "POST",
                  f"{args.api}/api/v1/form-analyses/{analysis['analysis_id']}"
-                 f"/derive-template?template_name={blank.stem}")
+                 f"/derive-template?template_name={blank.stem}&blank=true")
         )
         template_id = derived.get("template_id")
         if not template_id:

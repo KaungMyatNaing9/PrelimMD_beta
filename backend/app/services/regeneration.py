@@ -138,6 +138,7 @@ def regenerate(
     values: dict[str, Any],
     page_index: int = 0,
     ticks: Sequence[BoundingBox] = (),
+    loose: Sequence[tuple[BoundingBox, str, set[str]]] = (),
 ) -> bytes:
     """Render ``values`` onto the blank master for ``template`` and return PDF bytes.
 
@@ -146,7 +147,8 @@ def regenerate(
     not rendered; ``unplaced`` names them so a caller can say so.
 
     ``ticks`` are the boxes a patient ticked, as page fractions (``DetectedFormField.
-    ticked_boxes``); each is marked with an X in the box the blank prints there.
+    ticked_boxes``); each is marked with an X in the box the blank prints there. ``loose``
+    are values with no slot, drawn where they were read (``loose_values``).
     """
     blank = canonical_image_path(template.template_id, page_index)
     if not blank.exists():
@@ -180,8 +182,20 @@ def regenerate(
         texts.append(
             pdf_backend.Text(x0 + _indent(field, size, width), y1 - drawn * _descent(FONT), text, drawn)
         )
+    learned = next((f.font_size for f in page_def.fields if f.font_size), None)
+    for bbox, text, _ in loose:
+        x0, y1 = bbox.x * width, (bbox.y + bbox.height) * height
+        # The page's fill size where it was measured; otherwise the read words' own height,
+        # which runs from ascender to descender and is a little more than their size.
+        size = learned * height if learned else max(bbox.height * height * LOOSE_SIZE, 6.0 * width / LETTER_WIDTH_PT)
+        drawn = _width_matched(text, size)
+        texts.append(pdf_backend.Text(x0, y1 - drawn * _descent(FONT), text, drawn))
     texts += _tick_marks(blank, ticks, width, height)
     return pdf_backend.compose(blank, width, height, texts, boxes, fontname=FONT, color=INK)
+
+
+# A word box is about this much taller than the size its text was set at.
+LOOSE_SIZE = 0.8
 
 
 # An X fills most of the box it marks, and a recorded tick is matched to a box on the blank
@@ -259,6 +273,11 @@ def values_from_analysis(analysis, template=None, page_index: int = 0) -> dict[s
     *Name* second, for the fields position could not settle and for registry-backed
     templates, whose ids are canonical rather than derived.
     """
+    return _resolve(analysis, template, page_index)[0]
+
+
+def _resolve(analysis, template, page_index: int) -> tuple[dict[str, Any], list, set[int]]:
+    """``values_from_analysis``, also saying which filled fields a slot of the template took."""
     values: dict[str, Any] = {}
     # A choice whose ticks were located is regenerated as those ticks (``ticked_boxes``),
     # not as its caption written into a text region. Once a reviewer changes its value the
@@ -289,13 +308,48 @@ def values_from_analysis(analysis, template=None, page_index: int = 0) -> dict[s
             taken.add(i)
             claimed.add(j)
 
+    slot_ids = (
+        {CORPUS_KEY_ALIASES.get(f.field_id, f.field_id) for f in template.pages[page_index].fields}
+        if template is not None
+        else set()
+    )
+    placed = set(claimed)
     for j, field in enumerate(filled):
         if j in claimed:
             continue
-        values.setdefault(label_key(field.label_text), field.normalized_value)
-        if field.canonical_key:
-            values.setdefault(field.canonical_key, field.normalized_value)
-    return values
+        for key in (label_key(field.label_text), field.canonical_key):
+            if key and key not in values:
+                values[key] = field.normalized_value
+                if key in slot_ids:
+                    placed.add(j)
+    return values, filled, placed
+
+
+def loose_values(analysis, template, page_index: int = 0) -> list[tuple[BoundingBox, str, set[str]]]:
+    """Values read on a page that no slot of the template took: where each was read, its
+    text, and the keys it would have been filed under.
+
+    A template only has slots where its page's geometry offers a region, and a value
+    written where none was found -- the patient's name on a rule too long to be read as one
+    -- used to be left off the regenerated form. On a template learned from this very
+    upload the value can simply go back where it was read: the page is the same page.
+    """
+    _, filled, placed = _resolve(analysis, template, page_index)
+    lifted = template.pages[page_index].lifted
+    loose = []
+    for j, field in enumerate(filled):
+        if j in placed or field.page_index != page_index:
+            continue
+        text = _text_for(field.normalized_value, field.field_type)
+        if text is None or not any(ch.isalnum() for ch in text):
+            continue
+        # Only where the answer was lifted off the master: a "value" that is still printed
+        # there (a row of option captions a reader took for an answer) would be written over.
+        if not any(_overlap(field.answer_bbox, box) > 0 for box in lifted):
+            continue
+        keys = {label_key(field.label_text)} | ({field.canonical_key} if field.canonical_key else set())
+        loose.append((field.answer_bbox, text, keys))
+    return loose
 
 
 def drawn_as_ticks(field) -> bool:

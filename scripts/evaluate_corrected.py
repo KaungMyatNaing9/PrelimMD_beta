@@ -180,6 +180,8 @@ def main() -> int:
     parser.add_argument("--positions", choices=["none", "detected", "oracle"], default="oracle")
     parser.add_argument("--dump", default=None)
     parser.add_argument("--parallel", type=int, default=1, help="scoring workers")
+    parser.add_argument("--filled-blanks", action="store_true",
+                        help="the file in each blank's place is a filled copy (a no-blank set)")
     parser.add_argument("--no-same-copy", action="store_true",
                         help="diagnostic: do not tell the server a correction is of the enrolled copy")
     parser.add_argument(
@@ -230,7 +232,10 @@ def main() -> int:
         created = []
     taught = 0
     for blank in blanks:
-        template_id, note, enrolled_run = enrol_run(args.api, blank)
+        # A copy identical to the first set's fill is a filled copy standing in for a blank.
+        stand_in = FORMS / args.learn[0] / f"{blank.stem}_FILLED.pdf"
+        filled = args.filled_blanks or (stand_in.exists() and blank.read_bytes() == stand_in.read_bytes())
+        template_id, note, enrolled_run = enrol_run(args.api, blank, not filled)
         if not template_id:
             print(f"  {blank.name:28} --     {note}")
             continue

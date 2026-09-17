@@ -39,14 +39,19 @@ def templates(api: str) -> set[str]:
                .get("templates", []))
 
 
-def enrol(api: str, blank: Path) -> tuple[str | None, str]:
+def enrol(api: str, blank: Path, is_blank: bool = True) -> tuple[str | None, str]:
     """Learn a template from a blank form, as a clinic's first upload would."""
-    template_id, note, _ = enrol_run(api, blank)
+    template_id, note, _ = enrol_run(api, blank, is_blank)
     return template_id, note
 
 
-def enrol_run(api: str, blank: Path) -> tuple[str | None, str, str | None]:
-    """``enrol``, also returning the analysis the template was learned from."""
+def enrol_run(api: str, blank: Path, is_blank: bool = True) -> tuple[str | None, str, str | None]:
+    """``enrol``, also returning the analysis the template was learned from.
+
+    ``is_blank`` says the file really is a blank form, whose page is kept as it is for the
+    template's master. A set with no blanks puts a filled copy in its place, and that copy
+    has its answers lifted off, as the review page does for a form not marked blank.
+    """
     analysis = api_json(["curl", "-s", "--max-time", "600", "-X", "POST",
                          f"{api}/api/v1/form-analyses",
                          "-F", f"file=@{blank};type=application/pdf"])
@@ -54,7 +59,8 @@ def enrol_run(api: str, blank: Path) -> tuple[str | None, str, str | None]:
     if not run_id:
         return None, "analysis failed", None
     made = api_json(["curl", "-s", "--max-time", "600", "-X", "POST",
-                     f"{api}/api/v1/form-analyses/{run_id}/derive-template"])
+                     f"{api}/api/v1/form-analyses/{run_id}/derive-template"
+                     + ("?blank=true" if is_blank else "")])
     if not made:
         # A crash answers with a plain-text 500, not JSON. Reporting that as "not
         # derivable" hid a hard cap of fifty derived ids for a whole day.
@@ -75,6 +81,8 @@ def main() -> int:
     parser.add_argument("--set", dest="which", default="TEST4")
     parser.add_argument("--dump", default=None, help="passed through to evaluate_real_forms.py")
     parser.add_argument("--parallel", type=int, default=1, help="scoring workers")
+    parser.add_argument("--filled-blanks", action="store_true",
+                        help="the file in each blank's place is a filled copy (a no-blank set)")
     args = parser.parse_args()
 
     folder = FORMS / args.which
@@ -91,7 +99,7 @@ def main() -> int:
     print(f"enrolling {len(blanks)} blank forms from {args.which}")
     created = []
     for blank in blanks:
-        template_id, note = enrol(args.api, blank)
+        template_id, note = enrol(args.api, blank, not args.filled_blanks)
         if template_id:
             created.append(template_id)
         print(f"  {blank.name:28} {template_id or '--':6} {note}")
