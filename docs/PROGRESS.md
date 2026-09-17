@@ -3246,3 +3246,68 @@ each tick is (`DetectedFormField.ticked_boxes`), and regeneration draws a green 
 blank's own box nearest that place (`_tick_marks`), or nothing if the blank prints no box
 there; a value a reviewer edited goes back to text. Checked on a regenerated packet: X in
 Male, Divorced and No, the boxes the patient ticked.
+
+## 2026-09-17 — Regeneration: the master is the page, not a page with white boxes
+
+**What the user saw.** Comparing an upload with its regenerated copy: lines cut off by
+"random white boxes", one covering part of a logo, and no way to tell a regenerated value
+from one carried over. On their cCARE registration form the master showed all of it: every
+answer *region* painted white (`blank_from_filled`), which put white bands across the
+form's grey panel, its orange banner (a region bound to the clinic's name) and its
+watermark; a rule's region stops at the rule, so the lower half of each handwritten-size
+answer stayed under the regenerated one ("05/14/2026", "Long Haul Driver" half visible);
+and answers outside any region were never erased -- the patient's name, which had no slot
+and so was not regenerated either, looked regenerated when it was the original.
+
+**The master is now the page.**
+
+- Learned from a blank (`derive-template?blank=true`; "This is a blank form" on the review
+  page): the upload exactly, pixel for pixel.
+- Learned from a filled copy: only the ink of the answers the reader found is lifted
+  (`master_from_page`, `answer_ink`). A value's words are found around its answer box
+  (allowing OCR a character), with the rest of their run on the line, so "(559)" goes with
+  "555-0191" though the reader took it for 659; marks inside ticked boxes go too. Pixels
+  darker than the paper around them are filled in from the page around them (inpainting),
+  so a tinted panel stays tinted. A line that runs on past the lifted area is a rule and is
+  put back pixel for pixel; kept out of the fill instead, its pixels bled into the fill and
+  left the foot of every answer on its line.
+- Words beside a real tick box (one with a same-size sibling, since a bold "B" in a name
+  passes for a box) are option captions and are never lifted: a garbage "Transgender" value
+  made of the row's options once took the options and their boxes off the master.
+- An answer the reader missed stays in the patient's ink. That is the signal the user asked
+  for: green is what was extracted, the original ink is what was not.
+
+**Values with no slot** are drawn where they were read, when the template was learned from
+that same upload and the value's ink was lifted there (`loose_values`,
+`TemplatePage.lifted`); anything else is still reported in `X-Unplaced-Fields`. A reader's
+"value" whose ink was not lifted -- printed options it misread -- is not drawn over them.
+
+**Measured** (committed code d27bb5d against this change, same scripts, fresh enrolment):
+
+| | committed code | this change |
+|---|---|---|
+| round trip, 23 values on 3 layouts | 14 / 23 = 60.9% | **20 / 23 = 87.0%** |
+| layouts keeping at least half their values | 3 of 3 | 3 of 3 |
+| placement within 2 mm | 15 / 19 = 78.9%, median 1.23 mm | 15 / 20 = 75.0%, median 1.29 mm |
+| corrected track, blanks enrolled (LARGE -> LARGE_B, no model) | 91.3 / 94.5 | **91.7 / 94.4** (11 fields gained, none lost) |
+| corrected track, no blank (LARGE_SELF -> LARGE_B) | 89.9 / 94.0 | **90.2 / 94.0** (10 gained, 3 lost) |
+
+Both corrected tracks enrol every template afresh, so the masters -- which template matching
+and the printed text of taught slots are read from -- are the new ones. The three fields lost
+on the no-blank track are one packet's phone number read as "509" (its PDF and photograph)
+and a city read with its state; not examined further.
+
+Round trip, what moved: State, Zip Code and Email on one form, Employer "Riverside
+Logistics" (open since 2026-09-14: the half-erased original under the regenerated value read
+back as "Riverside"), a middle name, a second zip and a city now survive; one date reads back
+as "99/12/1979", the 150 dpi OCR floor this script already documents. Placement locates one
+more value than before, a city that was missing from the copy, 3.4 mm off, so the count
+within 2 mm is unchanged and the share falls.
+
+Two faults found while checking pages by eye, both fixed before the numbers above: a phone
+number's raw reading had taken the printed captions above it ("CITY STATE ZIP CODE
+412-555-0184"), and matching words against raw readings lifted those captions -- only the
+normalised value is matched now; and a garbage "Mo F o" read across "M [ ] F [ ]" lifted the
+printed F -- a text value whose answer region holds a row of tick boxes is never lifted.
+
+Templates learned before this change keep their white-box masters until learned again.

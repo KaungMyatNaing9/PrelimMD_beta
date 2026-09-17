@@ -1,20 +1,20 @@
-"""Derive a reusable blank template from a single filled form.
+"""Derive a reusable blank template from a single form, blank or filled.
 
-Regeneration needs a blank master plus field coordinates. When a form arrives that no
-registered template matches, both can be recovered from the upload itself: the boxes
-already located during analysis give the coordinates, and whiting out their interiors
-leaves the pre-printed form behind.
+Regeneration needs a blank master plus field coordinates. The coordinates come from the
+page's printed geometry. The master is the page itself: kept exactly as uploaded when it
+is a blank form, and with the answers the reader found lifted off when it is a filled one
+(``master_from_page``), so the printing, rules, tints and logos around them survive.
 
-Limits worth knowing. This only works for forms that draw their input boxes, because the
-box is what separates a filled value from the printed labels and logos around it. A form
-that writes values onto blank space or a dotted line needs a different signal — that is
-where a vision model would classify printed-versus-filled instead. And a single sample
-cannot prove a mark is a value rather than pre-printed text; two filled copies of the same
-form make that unambiguous, since whatever is identical across them is the template.
+Limits worth knowing. A single filled copy cannot prove a mark is an answer rather than
+pre-printed text: only what the reader took as an answer is lifted, so an answer it missed
+stays on the master in the patient's own ink -- which is also how a regenerated copy shows
+what was not extracted. A blank form makes the question disappear, which is why enrolling
+one is the better route.
 """
 
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
@@ -32,24 +32,19 @@ from app.schemas.models import (
 )
 from app.services import pdf_backend
 from app.services.canonical_registry import match, norm
-from app.services.field_layout import split_runs
+from app.services.field_layout import Box, detect_checkboxes, level_sibling, split_runs
 from app.services.form_analyzer import PRINTED_MARGIN, geometric_fields, widget_boxes
 from app.services.regeneration import label_key
 from app.services.templates import DERIVED_ROOT, preview_name, registry
 from app.services.vision_extractor import available as vision_available
 from app.services.vision_extractor import extract as vision_extract
 from app.services.vision_extractor import locate_values
-from app.services.word_source import words_from_image
+from app.services.word_source import group_lines_tolerant, words_from_image
 
 logger = logging.getLogger(__name__)
 
 # Corpus masters own T01-T49; derived templates are allocated above that so the two never
 # collide. TemplateDefinition constrains ids to T followed by two digits.
-# The largest real answer region measured in the corpus (a multi-line notes box)
-# covers 0.07 of the page. Anything appreciably larger is a section frame whose
-# printed captions must survive into the blank master, so it is left alone.
-MAX_ERASABLE_AREA_FRACTION = 0.12
-
 DERIVED_ID_START = 50
 DERIVED_ID_END = 9999
 
@@ -77,31 +72,201 @@ def _slug(label: str, used: set[str]) -> str:
     return candidate
 
 
-def blank_from_filled(image: np.ndarray, boxes: list[BoundingBox]) -> np.ndarray:
-    """Whiten the interior of each field box, leaving the printed form intact.
+# How much darker than the paper around it a pixel has to be to count as ink. Low enough
+# to take a glyph's anti-aliased edge too: at 40 a lifted answer left its outline behind.
+INK_CONTRAST = 24
+# How far around a field's answer box, in word heights, its answer's words may lie.
+ANSWER_REACH = 0.6
+# How far inside a ticked box its mark is lifted, as a share of the box's side: the box's
+# own outline stays.
+TICK_BORDER = 0.18
 
-    The inset keeps each box's own rule lines, so the blank still looks like the form
-    rather than a page with holes punched in it.
+
+def master_from_page(
+    image: np.ndarray,
+    answers: Sequence[tuple[float, float, float, float]],
+    ticks: Sequence[tuple[float, float, float, float]] = (),
+) -> np.ndarray:
+    """The page with the patient's answers lifted off and everything the form prints kept.
+
+    A master used to be the page with every answer *region* painted white, and a user
+    comparing a regenerated form with the upload saw what that does: white bands across a
+    grey panel, an orange banner and a watermark; a rule or a logo cut where a region
+    crossed it; the lower half of each answer left under the regenerated one, because a
+    rule's region stops at the rule; and answers outside any region -- the patient's name,
+    their age -- never erased at all, so they looked regenerated when they were carried over.
+
+    Only ink is lifted now: pixels of the words the reader took as answers (``answers``,
+    word boxes in page pixels) and of the marks inside ticked boxes (``ticks``), darker than
+    the paper around them, and never part of a rule line. What they covered is filled in
+    from the page around it, so a tinted panel stays tinted. With nothing to lift -- a blank
+    form -- the page comes back exactly as it was.
     """
-    blank = image.copy()
-    height, width = blank.shape[:2]
-    # The inset only has to spare the box's own rule line, so it scales with page
-    # resolution rather than box size. Scaling it with the box would leave a tall field's
-    # first line of text un-erased, since values sit flush against the top edge.
-    inset = max(2, round(min(height, width) * 0.003))
-    for box in boxes:
-        # A section frame ("Primary Insurance") encloses printed captions of its own.
-        # Erasing its interior strips those from the blank master and mangles the form,
-        # so only clear regions small enough to be a single answer.
-        # bbox dimensions are page fractions, so their product is already the share of
-        # the page this region covers.
-        if box.width * box.height > MAX_ERASABLE_AREA_FRACTION:
+    if not answers and not ticks:
+        return image.copy()
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    mask = np.zeros((height, width), np.uint8)
+    near = np.zeros((height, width), np.uint8)
+    for x0, y0, x1, y1 in answers:
+        pad = max(2, round((y1 - y0) * 0.2))
+        tall = max(3, round(y1 - y0))
+        # The paper is looked for a whole word's height away: dense or bold writing hides it
+        # from a nearer look, and the middle of such a word was left behind.
+        _mark_ink(gray, mask, x0 - pad, y0 - pad, x1 + pad, y1 + pad, tall)
+        _mark_ink(gray, near, x0 - tall, y0 - pad, x1 + tall, y1 + pad, tall)
+    for x0, y0, x1, y1 in ticks:
+        inset = max(2, round(min(x1 - x0, y1 - y0) * TICK_BORDER))
+        _mark_ink(gray, mask, x0 + inset, y0 + inset, x1 - inset, y1 - inset, max(3, round(min(x1 - x0, y1 - y0))))
+    if not mask.any():
+        return image.copy()
+    rules = _rule_lines(gray)
+    # A glyph's stroke often reaches past the box OCR drew round its word -- the first "a"
+    # of an email, the foot of a slash -- and stayed on the master. Ink touching what is
+    # lifted goes with it, once the rules are cut out: a rule touches every answer written
+    # on it, and would join them all to each other and to the printing around them.
+    # The rows either side of a rule are its anti-aliasing, and would join the answer's
+    # glyphs along it into one blob as long as the rule.
+    near[cv2.dilate(rules, np.ones((5, 1), np.uint8)) > 0] = 0
+    _, blobs = cv2.connectedComponents(near)
+    touching = np.unique(blobs[(near > 0) & (mask > 0)])
+    mask[np.isin(blobs, touching[touching > 0])] = 255
+    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8))
+    # A rule an answer sits on is lifted with it and then put back pixel for pixel: kept out
+    # of the fill instead, its dark pixels bled into what was filled beside it, and the foot
+    # of every answer stayed on its line as a smudge. A line is a rule only if it runs on
+    # past what was lifted: a long stroke of the writing itself lies wholly inside it and
+    # goes with the answer.
+    count, pieces, stats, _ = cv2.connectedComponentsWithStats(rules)
+    running_on = np.unique(pieces[(rules > 0) & (mask == 0)])
+    heights = sorted(y1 - y0 for _, y0, _, y1 in answers) or [20.0]
+    longest_stroke = max(60.0, 3 * heights[len(heights) // 2])
+    long_lines = [i for i in range(1, count) if max(stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]) >= longest_stroke]
+    keep = (rules > 0) & np.isin(pieces, np.union1d(running_on[running_on > 0], long_lines))
+    master = cv2.inpaint(image, mask, 4, cv2.INPAINT_TELEA)
+    master[keep] = image[keep]
+    return master
+
+
+def _mark_ink(gray: np.ndarray, mask: np.ndarray, x0: float, y0: float, x1: float, y1: float, reach: int) -> None:
+    """Mark the pixels of a region that are darker than the paper within ``reach`` of them."""
+    height, width = gray.shape
+    left, top = max(0, int(x0)), max(0, int(y0))
+    right, bottom = min(width, round(x1) + 1), min(height, round(y1) + 1)
+    if right - left < 2 or bottom - top < 2:
+        return
+    # The paper's own shade from a margin around the region, so a stroke filling the
+    # region is still measured against the paper rather than against itself.
+    m = reach
+    around = gray[max(0, top - m): min(height, bottom + m), max(0, left - m): min(width, right + m)]
+    paper = cv2.dilate(around, np.ones((2 * reach + 1, 2 * reach + 1), np.uint8))
+    oy, ox = top - max(0, top - m), left - max(0, left - m)
+    local = paper[oy: oy + bottom - top, ox: ox + right - left]
+    ink = local.astype(np.int16) - gray[top:bottom, left:right].astype(np.int16) > INK_CONTRAST
+    mask[top:bottom, left:right][ink] = 255
+
+
+def _rule_lines(gray: np.ndarray) -> np.ndarray:
+    """The page's ruled lines: strokes far longer than any letter, across or down."""
+    height, width = gray.shape
+    binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10)
+    across = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, width // 40), 1)))
+    down = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(40, height // 30))))
+    return cv2.bitwise_or(across, down)
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def answer_ink(
+    fields: list[DetectedFormField],
+    words: list,
+    width: float,
+    height: float,
+    checkboxes: Sequence[Box] = (),
+) -> tuple[list[tuple[float, float, float, float]], list[tuple[float, float, float, float]]]:
+    """Where a page's answers are inked: word boxes and ticked boxes, in page pixels.
+
+    A word belongs to an answer when it lies around the field's answer box and reads as one
+    of the answer's words, allowing OCR a character; the rest of that word's run on the line
+    goes with it, so "(559)" is lifted with "555-0191" though the reader took it for 659.
+    A choice's words are its printed options, so only its ticks are lifted, and a word on a
+    tick box's line within reach of the box is an option's caption whatever a reader made
+    of it: the options of a "Transgender" row, read as a value, were once lifted with their
+    boxes. A signature is not lifted.
+    """
+    tall = sorted(w.y1 - w.y0 for w in words)
+    unit = tall[len(tall) // 2] if tall else 20.0
+    boxes: list[tuple[float, float, float, float]] = []
+    ticks: list[tuple[float, float, float, float]] = []
+    taken: set[int] = set()
+    for field in fields:
+        for b in field.ticked_boxes:
+            ticks.append((b.x * width, b.y * height, (b.x + b.width) * width, (b.y + b.height) * height))
+        if field.field_type in (FieldType.MULTIPLE_CHOICE, FieldType.CHECKBOX, FieldType.SIGNATURE_PRESENCE):
             continue
-        x0, y0 = int(box.x * width) + inset, int(box.y * height) + inset
-        x1, y1 = int((box.x + box.width) * width) - inset, int((box.y + box.height) * height) - inset
-        if x1 > x0 and y1 > y0:
-            blank[y0:y1, x0:x1] = 255
-    return blank
+        # The normalised value is the answer; a raw reading can carry printed text with it
+        # (a phone number read as "CITY STATE ZIP CODE 412-555-0184" took those captions).
+        value = field.normalized_value if isinstance(field.normalized_value, str) else field.raw_value
+        wanted = set(_tokens(value)) if isinstance(value, str) else set()
+        if not wanted:
+            continue
+        a = field.answer_bbox
+        pad = unit * ANSWER_REACH
+        x0, y0 = a.x * width - pad, a.y * height - pad
+        x1, y1 = (a.x + a.width) * width + pad, (a.y + a.height) * height + pad
+        # An answer region holding a row of tick boxes holds their printed options, and a
+        # text value read there is those options misread ("Mo F o" for "M [ ] F [ ]"): a
+        # choice is answered by its ticks, so nothing of it is lifted as writing.
+        if sum(1 for b in checkboxes if x0 <= (b.x0 + b.x1) / 2 <= x1 and y0 <= (b.y0 + b.y1) / 2 <= y1) >= 2:
+            continue
+        around = [
+            w for w in words
+            if x0 <= (w.x0 + w.x1) / 2 <= x1 and y0 <= (w.y0 + w.y1) / 2 <= y1
+            and not w.text.rstrip().endswith(":")
+            and _tokens(w.text)
+            and not _beside_a_box(w, checkboxes)
+        ]
+        matched = {id(w) for w in around if any(_one_of(t, wanted) for t in _tokens(w.text))}
+        if not matched:
+            continue
+        for line in group_lines_tolerant(around):
+            for run in split_runs(line):
+                if any(id(w) in matched for w in run):
+                    for w in run:
+                        if id(w) not in taken:
+                            taken.add(id(w))
+                            boxes.append((w.x0, w.y0, w.x1, w.y1))
+    return boxes, ticks
+
+
+def _beside_a_box(word, checkboxes: Sequence[Box]) -> bool:
+    """Whether a word touches a tick box or sits on its line within a box's reach of it."""
+    for box in checkboxes:
+        side = box.x1 - box.x0
+        on_line = min(word.y1, box.y1) - max(word.y0, box.y0) > 0.3 * (word.y1 - word.y0)
+        if on_line and word.x0 - side * 1.5 <= box.x1 and word.x1 + side * 1.5 >= box.x0:
+            return True
+    return False
+
+
+def _one_of(token: str, wanted: set[str]) -> bool:
+    """Whether a word read on the page is one of an answer's words, misread by a character."""
+    if token in wanted:
+        return True
+    if len(token) < 3:
+        return False
+    from difflib import SequenceMatcher
+
+    return any(
+        len(w) >= 3
+        and (
+            SequenceMatcher(None, token, w).ratio() >= 0.7
+            or (len(w) == len(token) and sum(a != b for a, b in zip(w, token)) <= 1)
+        )
+        for w in wanted
+    )
 
 
 def _named_by_model(fields, page_image: Path):
@@ -318,7 +483,7 @@ def _is_a_caption(label: str) -> bool:
 
 
 def derive_template(
-    analysis: FormAnalysis, page_image: Path, template_name: str | None = None
+    analysis: FormAnalysis, page_image: Path, template_name: str | None = None, blank: bool = False
 ) -> TemplateDefinition:
     """Build and persist a template from an analysed form, then register it.
 
@@ -332,6 +497,9 @@ def derive_template(
 
     Only fields the analyser located as boxes are usable: an inline "label: value" match
     describes where the text happened to sit, not where the form provides space for it.
+
+    ``blank`` says the upload is a blank form: its page is the master exactly as it is.
+    Otherwise the answers the analysis found are lifted off the page to make the master.
     """
     folder = page_image.parent
     pdf = folder / "source.pdf"
@@ -339,7 +507,12 @@ def derive_template(
         folder / f"page_{index}.png" for index in range(1, max(1, len(analysis.pages)))
     ]
     learned = [
-        _learn_page(image, index, pdf if pdf.exists() else None)
+        _learn_page(
+            image,
+            index,
+            pdf if pdf.exists() else None,
+            [] if blank else [f for f in analysis.detected_fields if f.page_index == index],
+        )
         for index, image in enumerate(images)
         if image.exists()
     ]
@@ -357,8 +530,8 @@ def derive_template(
     template_id = next_template_id()
     out = DERIVED_ROOT / template_id
     out.mkdir(parents=True, exist_ok=True)
-    for page, blank, _ in learned:
-        cv2.imwrite(str(out / preview_name(page.page_index)), blank)
+    for page, master, _ in learned:
+        cv2.imwrite(str(out / preview_name(page.page_index)), master)
     definition = TemplateDefinition(
         template_id=template_id,
         template_name=template_name or f"Derived from {analysis.analysis_id}",
@@ -373,7 +546,7 @@ def derive_template(
 
 
 def _learn_page(
-    page_image: Path, index: int, pdf: Path | None
+    page_image: Path, index: int, pdf: Path | None, answers: Sequence[DetectedFormField] = ()
 ) -> tuple[TemplatePage, np.ndarray, int]:
     """One page's slots, its blank master, and how many regions were found at all."""
     # Always the geometric view, never the analysis's own fields: on a ruled form the
@@ -395,9 +568,16 @@ def _learn_page(
     if image is None:
         raise FileNotFoundError(f"Cannot read page image {page_image}")
     height, width = image.shape[:2]
-    blank = blank_from_filled(image, [f.answer_bbox for f in boxed])
+    if answers:
+        detected = detect_checkboxes(page_image, page_words)
+        # A letter can pass for a box ("B" in a name); an option's box has company.
+        options = [b for b in detected if level_sibling(b, [o for o in detected if o is not b])]
+        inked, ticked = answer_ink(list(answers), page_words, width, height, options)
+    else:
+        inked, ticked = [], []
+    blank = master_from_page(image, inked, ticked)
 
-    # The values are still on the page at this point -- ``blank_from_filled`` erases them
+    # The values are still on the page at this point -- ``master_from_page`` lifts them
     # only for the stored master -- so the size the form was actually filled at can be
     # measured here, and is what regeneration should reproduce.
     # One size for the whole page, not one per field. A form is filled at a single size,
@@ -458,6 +638,10 @@ def _learn_page(
         canonical_height=height,
         fields=fields,
         printed_words=_printed_layer(pdf, index, page_words, width, height),
+        lifted=[
+            BoundingBox(x=x0 / width, y=y0 / height, width=(x1 - x0) / width, height=(y1 - y0) / height)
+            for x0, y0, x1, y1 in inked
+        ],
     )
     return page, blank, found
 
