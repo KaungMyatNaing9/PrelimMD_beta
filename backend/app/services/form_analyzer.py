@@ -16,6 +16,8 @@ from app.schemas.models import BoundingBox, FieldType, TemplateField
 from app.services import pdf_backend
 from app.services.canonical_registry import PHRASING, known_captions, match, norm
 from app.services.field_layout import (
+    CAPTION_WORD_GAP,
+    LABEL_REACH,
     MARKED_INK_RATIO,
     Box,
     captions_for_row,
@@ -25,6 +27,7 @@ from app.services.field_layout import (
     detect_write_rules,
     ink_ratio,
     label_for_box,
+    option_phrase,
     partition,
     split_runs,
 )
@@ -549,10 +552,12 @@ def _ticked(boxes: list[Box], gray, marks: tuple[PdfMark, ...]) -> list[bool]:
     vector reading has nothing to say about.
     """
     from_pdf = [_pdf_tick(b, marks) for b in boxes]
-    if all(t is not None for t in from_pdf):
-        return [bool(t) for t in from_pdf]
     guessed = _marked([ink_ratio(gray, b) for b in boxes]) if gray is not None else [False] * len(boxes)
-    return [t if t is not None else g for t, g in zip(from_pdf, guessed)]
+    # A stamped mark in the text layer is certain; its absence is not. A patient's X drawn
+    # as vector strokes over a glyph box is no text object at all, so "the PDF shows no
+    # mark" read every such tick as empty -- judged against its own row, ink that stands
+    # out is a mark whatever drew it.
+    return [bool(t) or g for t, g in zip(from_pdf, guessed)]
 
 
 def _pdf_tick(box: Box, marks: tuple[PdfMark, ...]) -> bool | None:
@@ -612,7 +617,16 @@ def _answer_beyond_options(value, names: list[Word]) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
     options = {_alnum(word.text) for word in names}
-    extra = [t for t in (_alnum(part) for part in value.split()) if t and t not in options]
+    extra = []
+    for part in value.split():
+        token = _alnum(part)
+        # OCR reads a ballot box as a letter or two ("0)", "Kl", "LJ") and glues it to the
+        # caption beside it ("mMale", "OeEmail"): neither is somebody writing an answer.
+        if not token or token in options or len(token) <= 2:
+            continue
+        if any(o and (_similarity(token, o) >= 0.7 or (len(o) >= 4 and o in token)) for o in options):
+            continue
+        extra.append(token)
     return len("".join(extra)) >= MIN_WRITTEN_ANSWER
 
 
@@ -628,6 +642,7 @@ def _resolve_choice_fields(
     w: float,
     h: float,
     marks: tuple[PdfMark, ...] = (),
+    image: Path | None = None,
 ) -> set[Box]:
     """Report which option a tick-box field selects, instead of its row of printed text.
 
@@ -639,6 +654,7 @@ def _resolve_choice_fields(
     if gray is None:
         return set()
     claimed: set[Box] = set()
+    lines: list[list[Word]] | None = None
     # A tick box belongs to exactly one question. Where answer regions overlap, the
     # tightest one owns the row, so a wide neighbouring field cannot claim it too.
     for field in sorted(fields, key=lambda f: f.answer_bbox.width * f.answer_bbox.height):
@@ -650,8 +666,15 @@ def _resolve_choice_fields(
         )
         if len(inside) < MIN_CHOICE_OPTIONS:
             continue
-        names = captions_for_row(inside, words, checkboxes)
+        lb = field.label_bbox
+        caption = Box(lb.x * w, lb.y * h, (lb.x + lb.width) * w, (lb.y + lb.height) * h)
+        asked = [word for word in words if _centre_inside_box(Box(word.x0, word.y0, word.x1, word.y1), caption)]
+        names = captions_for_row(inside, words, checkboxes, asked)
         if names is None:
+            continue
+        if lines is None:
+            lines = group_lines_tolerant(words)
+        if _asks_its_own_question(inside, field, lines, checkboxes, w, h):
             continue
         # A field already holding a written answer is not a choice -- but the text sitting
         # in a choice row *is* its option labels, so the test has to be what remains once
@@ -683,7 +706,13 @@ def _resolve_choice_fields(
         # Captions arrive with whatever spacing the form used to separate the option from
         # its box, including the em spaces PDF text layers often carry.
         boxes_only = [b for b, _ in captions]
-        chosen = [c.strip() for (b, c), take in zip(captions, _ticked(boxes_only, gray, marks)) if take]
+        ticks = _ticked(boxes_only, gray, marks)
+        chosen = [
+            option_phrase(b, name, inside, words, checkboxes, image)
+            for (b, _), name, take in zip(captions, names, ticks)
+            if take
+        ]
+        field.ticked_boxes = [_fraction_box(b, w, h) for b, take in zip(boxes_only, ticks) if take]
         field.field_type = FieldType.MULTIPLE_CHOICE
         field.raw_value = ", ".join(chosen) or None
         field.normalized_value = field.raw_value
@@ -751,16 +780,17 @@ def _cluster_option_rows(
         # reach above let "Sex:" from the row above fall between two Marital Status boxes
         # and split that question in half.
         breaks = [
-            (word.x0, word.x1)
+            word
             for word in words
-            if word.text.rstrip().endswith(":") and min(word.y1, hi) > max(word.y0, lo)
+            if word.text.rstrip().endswith((":", "?")) and min(word.y1, hi) > max(word.y0, lo)
         ]
         current: list[Box] = []
         for box_ in band:
-            near = current and box_.x0 - current[-1].x1 <= median_width * OPTION_GAP_RATIO
-            divided = current and any(
-                current[-1].x1 <= (x0 + x1) / 2 <= box_.x0 for x0, x1 in breaks
+            near = current and (
+                box_.x0 - current[-1].x1 <= median_width * OPTION_GAP_RATIO
+                or _bridged_by_captions(current[-1], box_, words, median_width)
             )
+            divided = current and any(_divides(word, current[-1], box_, words) for word in breaks)
             if near and not divided:
                 current.append(box_)
             else:
@@ -770,6 +800,158 @@ def _cluster_option_rows(
         if current:
             rows.append(current)
     return rows
+
+
+# The words of an option's caption follow its box at a word space (``CAPTION_WORD_GAP``)
+# and start within this many box widths of it.
+CAPTION_START = 1.5
+CAPTION_MAX_WORDS = 5
+
+
+def _divides(label: Word, left: Box, right: Box, words: Sequence[Word]) -> bool:
+    """Whether a word ending in ":" or "?" between two boxes starts a new question.
+
+    "Marital Status: [x] Married ... Please Address As: [ ] Mr" is two questions, and the
+    label between the boxes says so. A colon or question mark is not always a label,
+    though, and treating every one as a divider split 29 ticked rows on the benchmark's
+    ticked copies into single boxes:
+
+        [ ] Yes - How many/day? ______   [ ] No        (part of the first option's caption)
+        [ ] Yes - date: ______   [ ] No                (followed by a write-in, not boxes)
+        a word from the line below, beside two tall boxes
+
+    So a divider has to sit on the row itself, be followed closely by what it asks about
+    rather than by an empty write-in, and not belong to the caption of the box before it.
+    """
+    if not left.x1 <= (label.x0 + label.x1) / 2 <= right.x0:
+        return False
+    if not min(left.y0, right.y0) <= (label.y0 + label.y1) / 2 <= max(left.y1, right.y1):
+        return False
+    height = label.y1 - label.y0
+    after = [
+        w.x0
+        for w in words
+        if w is not label and w.x0 >= label.x1 - 1 and w.x0 < right.x0
+        and min(w.y1, label.y1) - max(w.y0, label.y0) > 0.5 * height
+    ]
+    if min(after + [right.x0]) - label.x1 > (right.x1 - right.x0) * LABEL_REACH:
+        return False
+    return not _in_caption_of(left, right, label, words)
+
+
+def _in_caption_of(box: Box, until: Box, word: Word, words: Sequence[Word]) -> bool:
+    """Whether a word continues the caption printed right after a box.
+
+    Only continues: a label set straight after a box with no caption of its own between
+    them ("[ ]  Please Address As: [ ] Mr") opens the next question, not an option.
+    """
+    line = sorted(
+        (
+            w for w in words
+            if w.x0 >= box.x1 - 1 and w.x1 <= until.x0 + 1 and _span_overlap(w, box) > 0
+        ),
+        key=lambda w: w.x0,
+    )
+    if not line or line[0].x0 - box.x1 > (box.x1 - box.x0) * CAPTION_START:
+        return False
+    run = [line[0]]
+    for w in line[1:]:
+        if len(run) >= CAPTION_MAX_WORDS or w.x0 - run[-1].x1 > CAPTION_WORD_GAP * (w.y1 - w.y0):
+            break
+        run.append(w)
+    return any(w is word for w in run[1:])
+
+
+def _bridged_by_captions(left: Box, right: Box, words: Sequence[Word], unit: float) -> bool:
+    """Whether the space between two boxes is an option's caption, not a gap between questions.
+
+    Options with long captions -- "[ ] Hispanic or Latino   [ ] Not Hispanic or Latino" --
+    sit further apart than any fixed number of box widths, and measured box to box such a
+    row broke into single boxes that no longer formed a question (62 ticked answers on the
+    benchmark's ticked copies). Measured as the widest *blank* stretch between them, with
+    the caption's words filling the rest, the row holds; two questions side by side are
+    still divided by their labels' colons and question marks, which are tested apart.
+    """
+    lo, hi = min(left.y0, right.y0), max(left.y1, right.y1)
+    between = sorted(
+        (w for w in words if w.x0 >= left.x1 - 1 and w.x1 <= right.x0 + 1 and min(w.y1, hi) > max(w.y0, lo)),
+        key=lambda w: w.x0,
+    )
+    if not between:
+        return False
+    edges = [left.x1] + [x for w in between for x in (w.x0, w.x1)] + [right.x0]
+    widest = max(edges[i + 1] - edges[i] for i in range(0, len(edges) - 1, 2))
+    return widest <= unit * OPTION_GAP_RATIO
+
+
+# A leading enumerator on a question ("12.", "3)", "b.") is the form's numbering, not its
+# caption, and a lone letter before a caption is OCR debris -- a margin banner printed
+# sideways reads as "N I" in front of every row beside it.
+_ENUMERATOR = re.compile(r"^\(?(?:\d{1,3}|[a-hA-H]|[ivxIVX]{1,4})[.)]\s+")
+
+
+def _clean_question(label: str) -> str:
+    label = _ENUMERATOR.sub("", label.strip())
+    words = label.split()
+    while len(words) > 2 and len(words[0]) == 1 and words[0].isalpha():
+        words.pop(0)
+    return " ".join(words)
+
+
+def _question_left_of(span: Box, candidates: list[list[Word]], checkboxes: list[Box]) -> list[Word] | None:
+    """A question printed further left on the row's own line, when none sits near it.
+
+    A column of yes/no questions sets its boxes well to the right of the questions, beyond
+    the reach a label is otherwise looked for in, and 54 ticked answers on the benchmark's
+    ticked copies had no question as a result. Only a caption that ends as a question does
+    (":" or "?"), with no other box between it and the row, is taken.
+    """
+    best: tuple[float, list[Word]] | None = None
+    for line in candidates:
+        left = [w for w in line if w.x1 <= span.x0 + 2 and _span_overlap(w, span) > 0]
+        if not left:
+            continue
+        run = split_runs(left)[-1]
+        if not run[-1].text.rstrip().endswith((":", "?")):
+            continue
+        end = max(w.x1 for w in run)
+        if any(end <= (b.x0 + b.x1) / 2 <= span.x0 and _span_overlap_box(b, span) > 0 for b in checkboxes):
+            continue
+        distance = span.x0 - end
+        if best is None or distance < best[0]:
+            best = (distance, run)
+    return best[1] if best else None
+
+
+def _asks_its_own_question(
+    row: list[Box], field: DetectedFormField, lines: list[list[Word]], checkboxes: list[Box], w: float, h: float
+) -> bool:
+    """Whether boxes inside a field's answer region answer a question printed beside them.
+
+    An inline field's region runs on to the page edge, so on a line such as
+
+        Social Security #: ______________    Sex: [ ] M  [ ] F
+
+    it covers the Sex boxes, and the patient's sex was reported as their social security
+    number (25 ticked answers on the benchmark's ticked copies went to a neighbouring
+    caption this way). A question on the boxes' own line that is not the field's caption
+    is the question they answer, and the row is left to be read under it.
+    """
+    span = Box(min(b.x0 for b in row), min(b.y0 for b in row), max(b.x1 for b in row), max(b.y1 for b in row))
+    question = _question_left_of(span, lines, checkboxes)
+    if not question:
+        return False
+    lb = field.label_bbox
+    caption = Box(lb.x * w, lb.y * h, (lb.x + lb.width) * w, (lb.y + lb.height) * h)
+    return not any(_centre_inside_box(Box(q.x0, q.y0, q.x1, q.y1), caption) for q in question)
+
+
+def _span_overlap(word: Word, box: Box) -> float:
+    return max(0.0, min(word.y1, box.y1) - max(word.y0, box.y0))
+
+
+def _span_overlap_box(a: Box, b: Box) -> float:
+    return max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
 
 
 def _mark_row_fields(
@@ -782,6 +964,7 @@ def _mark_row_fields(
     h: float,
     start: int,
     marks: tuple[PdfMark, ...] = (),
+    image: Path | None = None,
 ) -> list[DetectedFormField]:
     """Make a field out of every row of tick boxes no answer region already owns.
 
@@ -805,11 +988,9 @@ def _mark_row_fields(
     rows = _cluster_option_rows(loose, words)
 
     fields: list[DetectedFormField] = []
+    lines: list[list[Word]] | None = None
     for row in rows:
         if len(row) < MIN_CHOICE_OPTIONS:
-            continue
-        names = captions_for_row(row, words, checkboxes)
-        if names is None:
             continue
         span = Box(
             min(b.x0 for b in row),
@@ -817,12 +998,37 @@ def _mark_row_fields(
             max(b.x1 for b in row),
             max(b.y1 for b in row),
         )
-        label_words = label_for_box(span, candidates, left_only=True)
+        label_words = label_for_box(span, candidates, left_only=True) or _question_left_of(
+            span, candidates, checkboxes
+        )
+        if not label_words:
+            # Candidates are the words no drawn region holds, and a question printed inside
+            # a table cell or over a detected rule is held by one: 96 ticked answers on the
+            # benchmark's ticked copies had their question in plain sight on the boxes' own
+            # line ("Is your current condition due to an accident?  [x] Yes  [ ] No") and
+            # were dropped for having none. Every word on the line may be the question, as
+            # long as it ends as one.
+            if lines is None:
+                lines = group_lines_tolerant(words)
+            label_words = _question_left_of(span, lines, checkboxes)
         if not label_words:
             continue
-        label = " ".join(z.text for z in label_words).rstrip(":")
+        # A question ends at its colon or question mark; words after it on the same run are
+        # the first option's caption, printed before its box ("Marital Status: Single [ ]").
+        asked = [i for i, z in enumerate(label_words) if z.text.rstrip().endswith((":", "?"))]
+        if asked:
+            label_words = label_words[: asked[-1] + 1]
+        names = captions_for_row(row, words, checkboxes, label_words)
+        if names is None:
+            continue
+        label = _clean_question(" ".join(z.text for z in label_words).rstrip(":"))
         mapped, score, reason = match(label)
-        chosen = [n.text.strip() for n, take in zip(names, _ticked(row, gray, marks)) if take]
+        ticks = _ticked(row, gray, marks)
+        chosen = [
+            option_phrase(b, n, row, words, checkboxes, image)
+            for b, n, take in zip(row, names, ticks)
+            if take
+        ]
         answer = ", ".join(chosen) or None
         fields.append(
             DetectedFormField(
@@ -850,9 +1056,14 @@ def _mark_row_fields(
                 is_blank=answer is None,
                 confidence=0.9 if chosen else 0.6,
                 needs_review=not chosen,
+                ticked_boxes=[_fraction_box(b, w, h) for b, take in zip(row, ticks) if take],
             )
         )
     return fields
+
+
+def _fraction_box(b: Box, w: float, h: float) -> BoundingBox:
+    return BoundingBox(x=b.x0 / w, y=b.y0 / h, width=(b.x1 - b.x0) / w, height=(b.y1 - b.y0) / h)
 
 
 def _blank_option_captions(
@@ -889,6 +1100,10 @@ def _blank_option_captions(
         return
     for field in fields:
         value = field.normalized_value
+        # A choice's value *is* the caption of the box that was ticked; this clears only
+        # text values that merely repeat captions, never a tick that was read.
+        if field.field_type == FieldType.MULTIPLE_CHOICE:
+            continue
         if not isinstance(value, str) or not value.strip():
             continue
         wanted = [part for part in (_alnum(p) for p in value.split()) if part]
@@ -983,6 +1198,8 @@ def _blank_furniture(fields: list[DetectedFormField]) -> None:
     """
     for field in fields:
         value = field.normalized_value
+        if field.field_type == FieldType.MULTIPLE_CHOICE:
+            continue  # judged by ink, and its value is a printed caption by construction
         if not isinstance(value, str) or not value.strip():
             continue
         if _is_letterhead(field.label_text) or (
@@ -1061,10 +1278,12 @@ def _best_layout(
         fields = max((boxed, inline), key=reads)
         layout = "boxed" if fields is boxed else "inline"
     checkboxes = detect_checkboxes(page_image, words)
-    claimed = _resolve_choice_fields(fields, checkboxes, words, gray, w, h, marks)
+    # OCR can glue a box to its caption; a chosen caption is then read again from the page.
+    ocr_page = page_image if source == "ocr" else None
+    claimed = _resolve_choice_fields(fields, checkboxes, words, gray, w, h, marks, ocr_page)
     # Rows of tick boxes no answer region covers are questions of their own.
     choices = _mark_row_fields(
-        checkboxes, claimed, words, group_lines_tolerant(free), gray, w, h, len(fields), marks
+        checkboxes, claimed, words, group_lines_tolerant(free), gray, w, h, len(fields), marks, ocr_page
     )
     _blank_furniture(fields)
     _blank_option_captions(fields, checkboxes, words, h)

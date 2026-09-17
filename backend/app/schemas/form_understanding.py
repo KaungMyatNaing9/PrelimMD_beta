@@ -75,6 +75,9 @@ class DetectedFormField(BaseModel):
     label_bbox: BoundingBox
     answer_bbox: BoundingBox
     options: list[str] = Field(default_factory=list)
+    # Where the ticked boxes of a choice are, as page fractions, so a regenerated form can
+    # mark the same boxes rather than write the chosen caption across the row.
+    ticked_boxes: list[BoundingBox] = Field(default_factory=list)
     required_status: RequiredStatus = RequiredStatus.UNKNOWN
     required_confidence: float = Field(ge=0, le=1)
     detection_confidence: float = Field(ge=0, le=1)

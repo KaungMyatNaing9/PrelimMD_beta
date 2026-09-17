@@ -62,8 +62,8 @@ def pdf_marks(page) -> list[PdfMark]:
     glyphs -- most forms in this project's corpus -- and rendered-page ink measurement is
     still how those are read.
     """
-    chars: list[tuple[str, str, tuple[float, float, float, float], int]] = [
-        (ch.text, ch.font.lower(), (ch.x0, ch.y0, ch.x1, ch.y1), ch.block)
+    chars = [
+        (ch.text, ch.font.lower(), (ch.x0, ch.y0, ch.x1, ch.y1), ch.block, _glyph_box(ch))
         for ch in page.chars()
         if ch.text.strip()
     ]
@@ -73,13 +73,32 @@ def pdf_marks(page) -> list[PdfMark]:
     others = [c for c in chars if id(c) not in anchor_ids]
 
     marks = []
-    for _glyph, _font, box, block_id in anchors:
+    for _glyph, _font, box, block_id, glyph in anchors:
         ticked = any(
-            other_block != block_id and _char_overlap(box, other_box) > MARK_OVERLAP_SHARE
-            for _c, _f, other_box, other_block in others
+            other_block != block_id and _char_overlap(glyph, other_glyph) > MARK_OVERLAP_SHARE
+            for _c, _f, _b, other_block, other_glyph in others
         )
         marks.append(PdfMark(box[0], box[1], box[2], box[3], ticked))
     return marks
+
+
+# The part of a character's line a glyph actually occupies, in font sizes above and below
+# its baseline.
+GLYPH_ABOVE = 0.8
+GLYPH_BELOW = 0.2
+
+
+def _glyph_box(ch) -> tuple[float, float, float, float]:
+    """A character's box as tall as its glyph, not as its font claims to be.
+
+    A character's box runs from the font's ascent to its descent, and a font descriptor
+    can claim far more than its letters use: Cambria declares 3.1 em up and 2.5 em down,
+    so its captions read 61 points tall at 11 points, lay over the tick boxes on the lines
+    around them, and 30 of one form's 40 boxes read as marked with nobody's mark on them.
+    A mark stamped on a box sits on the box's own line, so overlap is measured glyph to
+    glyph.
+    """
+    return (ch.x0, ch.baseline - GLYPH_ABOVE * ch.size, ch.x1, ch.baseline + GLYPH_BELOW * ch.size)
 
 
 def _char_overlap(anchor: tuple, other: tuple) -> float:
