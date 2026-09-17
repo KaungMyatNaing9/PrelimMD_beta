@@ -673,6 +673,230 @@ def fill_page(
     return written, skipped
 
 
+# --- tick boxes ------------------------------------------------------------------
+#
+# --tick answers choice questions the way a patient does: an X in the box of one option,
+# and no text. Boxes are found on the blank's own text and drawing layers -- a symbol-font
+# glyph or a small stroked square, or a checkbox widget -- never with the extractor, so the
+# benchmark stays independent of what it scores. The answer recorded is the option's
+# caption as printed, under the question's caption as printed.
+
+BOX_CHARS = set("\u2610\u25a1\u2751\u2752\u25a2\u25fb\u2b1c")
+# Outline squares in the Wingdings family, under their ASCII and private-use codes.
+SYMBOL_BOX_CHARS = set("oqr\u00a8\uf06f\uf071\uf072\uf0a8")
+SYMBOL_FONTS = ("wingding", "webding", "dingbat")
+BOX_MIN_PT, BOX_MAX_PT = 3.5, 16.0
+CAPTION_REACH = 3.0     # box widths to the right in which an option's caption starts
+CAPTION_WORDS = 5
+LABEL_WORDS = 6
+CHOICE_KEYS = (("gender", "sex"), ("sex", "sex"), ("marital", "marital_status"),
+               ("race", "race"), ("ethnic", "ethnicity"), ("hispanic", "ethnicity"),
+               ("relationship", "relationship"), ("language", "language"))
+
+
+def _squareish(x0: float, y0: float, x1: float, y1: float) -> bool:
+    w, h = x1 - x0, y1 - y0
+    return BOX_MIN_PT <= w <= BOX_MAX_PT and BOX_MIN_PT <= h <= BOX_MAX_PT and 0.7 <= w / h <= 1.43
+
+
+def _drawn_square(page, cell: fitz.Rect) -> fitz.Rect | None:
+    """The square a box glyph actually draws inside its character cell."""
+    zoom = 8
+    pix = page.get_pixmap(clip=cell, matrix=fitz.Matrix(zoom, zoom), alpha=False, colorspace=fitz.csGRAY)
+    if pix.width == 0 or pix.height == 0:
+        return None
+    import numpy as np
+
+    ink = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width) < 128
+    ys, xs = np.nonzero(ink)
+    if xs.size == 0:
+        return None
+    return fitz.Rect(cell.x0 + xs.min() / zoom, cell.y0 + ys.min() / zoom,
+                     cell.x0 + (xs.max() + 1) / zoom, cell.y0 + (ys.max() + 1) / zoom)
+
+
+def tick_boxes(page) -> list[tuple[fitz.Rect, object]]:
+    """Every empty tick box on the page, as (rect, widget or None)."""
+    found: list[tuple[fitz.Rect, object]] = []
+    for block in page.get_text("rawdict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                symbol = any(f in span["font"].lower() for f in SYMBOL_FONTS)
+                for ch in span["chars"]:
+                    if ch["c"] in BOX_CHARS or (symbol and ch["c"] in SYMBOL_BOX_CHARS):
+                        # A glyph's cell runs from the font's ascent to its descent; where
+                        # the square sits inside it depends on the font, so it is read off
+                        # the rendered ink rather than guessed.
+                        r = _drawn_square(page, fitz.Rect(ch["bbox"]))
+                        if r is not None and _squareish(*r):
+                            found.append((r, None))
+    for drawing in page.get_drawings():
+        if drawing.get("fill") not in (None, (1.0, 1.0, 1.0)):
+            continue
+        rect = drawing.get("rect")
+        items = drawing.get("items", [])
+        is_square = any(op[0] == "re" for op in items) or (len(items) == 4 and all(op[0] == "l" for op in items))
+        if rect is not None and is_square and _squareish(*rect):
+            found.append((fitz.Rect(rect), None))
+    for widget in page.widgets():
+        if widget.field_type_string == "CheckBox" and _squareish(*widget.rect):
+            found.append((fitz.Rect(widget.rect), widget))
+    unique: list[tuple[fitz.Rect, object]] = []
+    for rect, widget in sorted(found, key=lambda item: (item[1] is None, item[0].y0, item[0].x0)):
+        if not any(abs(rect.x0 - r.x0) < 3 and abs(rect.y0 - r.y0) < 3 for r, _ in unique):
+            unique.append((rect, widget))
+    return unique
+
+
+def _caption_right_of(box: fitz.Rect, words, stop_x: float) -> tuple[str, float]:
+    """The option caption printed just right of a box, and where it ends."""
+    line = sorted(
+        (w for w in words
+         if min(w[3], box.y1) - max(w[1], box.y0) > 0.4 * box.height and w[0] >= box.x1 - 1 and w[2] <= stop_x + 1),
+        key=lambda w: w[0],
+    )
+    if not line or line[0][0] > box.x1 + CAPTION_REACH * box.width:
+        return "", box.x1
+    taken = [line[0]]
+    for word in line[1:]:
+        if len(taken) >= CAPTION_WORDS or word[0] - taken[-1][2] > 0.6 * (word[3] - word[1]):
+            break
+        taken.append(word)
+    return " ".join(w[4] for w in taken).strip(" :_"), taken[-1][2]
+
+
+def option_rows(page):
+    """Rows of boxed options with the question they answer: (label, [(rect, widget, caption)])."""
+    # Upright words only: a banner printed sideways down the margin ("PATIENT INFORMATION")
+    # sits level with every row beside it and would be read into their captions.
+    words = [w for w in page.get_text("words") if not (len(w[4]) > 2 and (w[3] - w[1]) > 1.8 * (w[2] - w[0]))]
+    boxes = tick_boxes(page)
+    lines: list[list[tuple[fitz.Rect, object]]] = []
+    for rect, widget in sorted(boxes, key=lambda b: ((b[0].y0 + b[0].y1) / 2, b[0].x0)):
+        centre = (rect.y0 + rect.y1) / 2
+        for line in lines:
+            if abs((line[0][0].y0 + line[0][0].y1) / 2 - centre) <= line[0][0].height / 2:
+                line.append((rect, widget)); break
+        else:
+            lines.append([(rect, widget)])
+    rows = []
+    for line in lines:
+        line.sort(key=lambda b: b[0].x0)
+        entries = []
+        for i, (rect, widget) in enumerate(line):
+            stop = line[i + 1][0].x0 if i + 1 < len(line) else page.rect.x1
+            caption, end = _caption_right_of(rect, words, stop)
+            entries.append((rect, widget, caption, end))
+        # A question's caption ends in a colon: one printed between two boxes starts the
+        # next question on the same line.
+        current: list = []
+        current_start = page.rect.x0
+        rows_here = []
+        for i, entry in enumerate(entries):
+            if current:
+                gap_words = [w for w in words if current[-1][3] <= w[0] and w[2] <= entry[0].x0 + 1
+                             and min(w[3], entry[0].y1) - max(w[1], entry[0].y0) > 0.4 * entry[0].height]
+                if any(w[4].endswith(":") for w in gap_words):
+                    rows_here.append((current, current_start))
+                    current = []
+            if not current:
+                # The question's caption lies between the previous option and this box.
+                current_start = entries[i - 1][3] if i else page.rect.x0
+            current.append(entry)
+        if current:
+            rows_here.append((current, current_start))
+        for row, start in rows_here:
+            if len(row) < 2 or not all(caption and len(caption.split()) <= CAPTION_WORDS for _, _, caption, _ in row):
+                continue
+            first = row[0][0]
+            left = sorted(
+                (w for w in words if start - 1 <= w[0] and w[2] <= first.x0 + 1
+                 and min(w[3], first.y1) - max(w[1], first.y0) > 0.4 * first.height),
+                key=lambda w: w[0],
+            )
+            label_words = []
+            for word in reversed(left):
+                if _is_a_rule(word[4]) or (label_words and label_words[0][0] - word[2] > 1.5 * (word[3] - word[1])):
+                    break  # a rule, or a gap: the previous field's answer space
+                if label_words and word[4].rstrip().endswith(":"):
+                    break  # the previous field's caption
+                label_words.insert(0, word)
+                if len(label_words) >= LABEL_WORDS:
+                    break
+            printed = " ".join(w[4] for w in label_words).strip(" _")
+            label = printed.strip(" :")
+            # Only a question: its caption ends in a colon or a question mark, or names a
+            # choice the patient record answers. Headings and wrapped sentence fragments
+            # ("INFORMATION", "With") beside a row of boxes are not questions anyone could
+            # expect a reader to name.
+            is_question = printed.endswith((":", "?")) or any(word in label.lower() for word, _ in CHOICE_KEYS)
+            if label and is_question and any(c.isalpha() for c in label):
+                rows.append((label, [(r, wd, c) for r, wd, c, _ in row]))
+    return rows
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _choose(label: str, captions: list[str], patient: dict[str, str], rng) -> int:
+    key = next((k for word, k in CHOICE_KEYS if word in label.lower()), None)
+    if key and key in patient:
+        want = patient[key]
+        for i, caption in enumerate(captions):
+            if _tokens(caption) == _tokens(want):
+                return i
+        if key == "sex":
+            for i, caption in enumerate(captions):
+                if _tokens(caption) == {want[0].lower()}:
+                    return i
+        for i, caption in enumerate(captions):
+            a, b = _tokens(caption), _tokens(want)
+            if a and b and (a <= b or b <= a):
+                return i
+    return rng.randrange(len(captions))
+
+
+def tick_page(
+    page, patient: dict[str, str], rng, taken: set[str], *, check: bool, pending: list | None = None
+) -> dict[str, str]:
+    """Tick one option on every boxed choice question; {question caption: option caption}.
+
+    A pen X is not drawn here but appended to ``pending`` as (page number, box), for
+    ``draw_ticks`` once the document is flattened: flattening paints each form widget's
+    appearance over the page, and on forms whose widgets cover their printed boxes that
+    white appearance hid every X drawn before it (24 of 268 ticks on the first build).
+    """
+    written: dict[str, str] = {}
+    for label, row in option_rows(page):
+        if label in taken or label in written:
+            continue
+        captions = [c for _, _, c in row]
+        pick = _choose(label, captions, patient, rng)
+        rect, widget, caption = row[pick]
+        if not check:
+            if widget is not None:
+                widget.field_value = widget.on_state()
+                widget.update()
+            elif pending is not None:
+                pending.append((page.number, fitz.Rect(rect)))
+        written[label] = caption
+    return written
+
+
+def draw_ticks(doc, pending: list) -> None:
+    """A pen X in each pending box, on top of everything the page already shows."""
+    for number, rect in pending:
+        page = doc[number]
+        # Inside the box, as a pen X is, with a stroke that scales with the box: a fixed
+        # 1.3pt stroke filled a 5pt box solid.
+        inset = rect.width * 0.22
+        stroke = max(0.5, rect.width * 0.1)
+        a = fitz.Rect(rect.x0 + inset, rect.y0 + inset, rect.x1 - inset, rect.y1 - inset)
+        page.draw_line(a.tl, a.br, color=INK, width=stroke)
+        page.draw_line(a.bl, a.tr, color=INK, width=stroke)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default="data/real-forms/LARGE")
@@ -691,12 +915,15 @@ def main() -> int:
     # Fill as completely as the forms allow: more of an intake packet's questions, and a
     # value shrunk (never below 7pt) where the line after its label is short.
     ap.add_argument("--thorough", action="store_true")
+    # Answer boxed choice questions with an X in one option's box, and no text.
+    ap.add_argument("--tick", action="store_true")
     args = ap.parse_args()
     labels = {**LABELS, **LABELS_MORE} if args.thorough else LABELS
 
     folder = ROOT / args.dir
     truth: dict[str, dict[str, str]] = {}
     patients: dict[str, str] = {}
+    ticked_labels: dict[str, list[str]] = {}
     for pdf in sorted(folder.glob("*.pdf")):
         if pdf.stem.endswith("_FILLED"):
             continue
@@ -708,21 +935,32 @@ def main() -> int:
             patient.update(more_for(seed, patient))
         all_written: dict[str, str] = {}
         per_page: list[dict[str, str]] = []
+        choices: dict[int, list[str]] = {}
+        pending: list = []
         notes: list[str] = []
         for index in range(min(args.pages, doc.page_count)):
             page = doc[index]
             # Widgets first: where a form offers a typed field, that is where the answer
             # goes, and the printed caption beside it has no rule to write on anyway.
-            typed, tight = fill_widgets(page, patient, set(all_written), check=args.check, labels=labels)
+            ticked: dict[str, str] = {}
+            if args.tick:
+                rng = random.Random(int(hashlib.sha256(f"{seed}#tick{index}".encode()).hexdigest()[:16], 16))
+                ticked = tick_page(page, patient, rng, set(all_written), check=args.check, pending=pending)
+                all_written.update(ticked)
+                choices.setdefault(index, []).extend(ticked)
+            # A question answered by a tick is not answered again in writing.
+            answered = {lab for lab in labels if any(_tokens(lab) <= _tokens(q) for q in ticked)}
+            typed, tight = fill_widgets(page, patient, set(all_written) | answered, check=args.check, labels=labels)
             all_written.update(typed)
             notes += tight
             written, skipped = fill_page(
-                page, patient, set(all_written), check=args.check, labels=labels, shrink=args.thorough
+                page, patient, set(all_written) | answered, check=args.check, labels=labels, shrink=args.thorough
             )
             all_written.update(written)
-            per_page.append({**typed, **written})
+            per_page.append({**ticked, **typed, **written})
             notes += skipped
-        print(f"\n{pdf.name}: {len(all_written)} fields filled")
+        print(f"\n{pdf.name}: {len(all_written)} fields filled"
+              + (f", {sum(len(v) for v in choices.values())} by tick" if args.tick else ""))
         for label, value in all_written.items():
             print(f"    {label:26} = {value}")
         if notes:
@@ -735,6 +973,7 @@ def main() -> int:
         # answers it has no way to see; baked, a fillable form is exactly what a patient
         # prints, which is the artefact the rest of the corpus already is.
         doc.bake()
+        draw_ticks(doc, pending)
         doc.save(out)
         # Render the page that actually carries answers, not always page 1. Half these
         # packets open with a welcome letter, so a page-1 render was a picture of prose
@@ -747,8 +986,12 @@ def main() -> int:
         # answers to it would score fields against a picture that never contained them.
         truth[out.name] = all_written
         patients[out.name] = patient["full_name"]
+        if choices:
+            ticked_labels[out.name] = sorted({q for qs in choices.values() for q in qs})
         if per_page[best]:
             truth[jpg.name] = per_page[best]
+            if choices.get(best):
+                ticked_labels[jpg.name] = sorted(set(choices[best]))
 
     if truth and not args.check:
         record = folder / "ground_truth_new.json"
@@ -763,6 +1006,7 @@ def main() -> int:
                         "against these. A different invented patient per form."
                     ),
                     "_patients": patients,
+                    **({"_ticked": ticked_labels} if ticked_labels else {}),
                     **truth,
                 },
                 indent=2,
