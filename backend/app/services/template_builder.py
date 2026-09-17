@@ -32,7 +32,13 @@ from app.schemas.models import (
 )
 from app.services import pdf_backend
 from app.services.canonical_registry import match, norm
-from app.services.field_layout import Box, detect_checkboxes, level_sibling, split_runs
+from app.services.field_layout import (
+    Box,
+    detect_checkboxes,
+    level_sibling,
+    option_phrase,
+    split_runs,
+)
 from app.services.form_analyzer import PRINTED_MARGIN, geometric_fields, widget_boxes
 from app.services.regeneration import label_key
 from app.services.templates import DERIVED_ROOT, preview_name, registry
@@ -601,6 +607,7 @@ def _learn_page(
     fill_size = sorted(measured)[len(measured) // 2] if len(measured) >= MIN_FILL_MEASUREMENTS else None
     used: set[str] = set()
     fields = []
+    choices = _choice_slots(page_image, page_words, width, height, used)
     for field in boxed:
         # Real forms repeat a caption per section — "Name" and "Phone Number" appear
         # under primary insurance, secondary insurance and emergency contact alike. Two
@@ -636,7 +643,7 @@ def _learn_page(
         page_index=index,
         canonical_width=width,
         canonical_height=height,
-        fields=fields,
+        fields=fields + choices,
         printed_words=_printed_layer(pdf, index, page_words, width, height),
         lifted=[
             BoundingBox(x=x0 / width, y=y0 / height, width=(x1 - x0) / width, height=(y1 - y0) / height)
@@ -649,6 +656,55 @@ def _learn_page(
 # How far beyond a taught region an answer's words are looked for in the printed layer:
 # the layer holds word centres, and a value can start a hair before the region drawn.
 TAUGHT_LAYER_MARGIN = 0.012
+
+
+def _choice_slots(
+    page_image: Path, words: list, width: float, height: float, used: set[str]
+) -> list[TemplateField]:
+    """The page's tick-box questions as slots: the boxes, their captions, the question.
+
+    A choice is the one kind of answer a blank fully describes: where the boxes are, what
+    each is called and what the question is. Recording it means a filled copy is read by
+    measuring ink in known boxes, instead of finding the row, its captions and its question
+    again on every copy -- which is where most tick answers were lost.
+    """
+    from app.services.form_analyzer import choice_rows
+
+    boxes = detect_checkboxes(page_image, words)
+
+    if not boxes:
+        return []
+    slots: list[TemplateField] = []
+    for row, names, label_words in choice_rows(boxes, set(), words, group_lines_tolerant(words)):
+        label = " ".join(z.text for z in label_words).rstrip(":").strip()
+        if not label:
+            continue
+        mapped, _, _ = match(label)
+        base = mapped.canonical_key if mapped else _slug(label, used)
+        if base in used:
+            continue
+        used.add(base)
+        span = (min(b.x0 for b in row), min(b.y0 for b in row), max(b.x1 for b in row), max(b.y1 for b in row))
+        slots.append(
+            TemplateField(
+                field_id=base,
+                label=label,
+                field_type=FieldType.MULTIPLE_CHOICE,
+                bbox=BoundingBox(
+                    x=span[0] / width, y=span[1] / height,
+                    width=(span[2] - span[0]) / width, height=(span[3] - span[1]) / height,
+                ),
+                # The whole caption, re-read off the page where OCR glued a box to it.
+                options=[option_phrase(b, n, row, words, boxes, page_image) for b, n in zip(row, names)],
+                option_boxes=[
+                    BoundingBox(x=b.x0 / width, y=b.y0 / height,
+                                width=(b.x1 - b.x0) / width, height=(b.y1 - b.y0) / height)
+                    for b in row
+                ],
+                review_threshold=0.75,
+            )
+        )
+    return slots
 
 
 def _without_tokens(text: str | None, value: str) -> str | None:

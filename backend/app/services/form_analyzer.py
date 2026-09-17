@@ -954,41 +954,29 @@ def _span_overlap_box(a: Box, b: Box) -> float:
     return max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
 
 
-def _mark_row_fields(
+class ChoiceRow(NamedTuple):
+    """One question answered by ticking: its boxes, the word naming each, and its label."""
+
+    boxes: list[Box]
+    names: list[Word]
+    label: list[Word]
+
+
+def choice_rows(
     checkboxes: list[Box],
     claimed: set[Box],
     words: list[Word],
     candidates: list[list[Word]],
-    gray,
-    w: float,
-    h: float,
-    start: int,
-    marks: tuple[PdfMark, ...] = (),
-    image: Path | None = None,
-) -> list[DetectedFormField]:
-    """Make a field out of every row of tick boxes no answer region already owns.
+) -> list[ChoiceRow]:
+    """Every row of tick boxes no answer region owns, with its captions and its question.
 
-    Until now a choice was only ever found as a by-product of finding a *written-answer*
-    region: the boxes had to fall inside a rule or a drawn box before anything looked at
-    them. A question like
-
-        Marital Status:  [ ] Divorced  [ ] Legally Separated  [x] Married
-
-    has no rule anywhere on it, so no region existed and the row was invisible. On one
-    real registration form that was 41 tick boxes across 12 rows, of which regions covered
-    2 -- the form's entire demographic section read as prose.
-
-    A row of tick boxes is a question in its own right, so it makes its own field here.
+    Shared by the page's own reading (``_mark_row_fields``) and by enrolment, which records
+    a blank's rows on its template so a filled copy only has to be measured for ink.
     """
-    if gray is None:
-        return []
     loose = [b for b in checkboxes if b not in claimed]
-    if not loose:
-        return []
-    rows = _cluster_option_rows(loose, words)
-
-    fields: list[DetectedFormField] = []
+    rows = _cluster_option_rows(loose, words) if loose else []
     lines: list[list[Word]] | None = None
+    found: list[ChoiceRow] = []
     for row in rows:
         if len(row) < MIN_CHOICE_OPTIONS:
             continue
@@ -1021,6 +1009,46 @@ def _mark_row_fields(
         names = captions_for_row(row, words, checkboxes, label_words)
         if names is None:
             continue
+        found.append(ChoiceRow(row, names, label_words))
+    return found
+
+
+def _mark_row_fields(
+    checkboxes: list[Box],
+    claimed: set[Box],
+    words: list[Word],
+    candidates: list[list[Word]],
+    gray,
+    w: float,
+    h: float,
+    start: int,
+    marks: tuple[PdfMark, ...] = (),
+    image: Path | None = None,
+) -> list[DetectedFormField]:
+    """Make a field out of every row of tick boxes no answer region already owns.
+
+    Until now a choice was only ever found as a by-product of finding a *written-answer*
+    region: the boxes had to fall inside a rule or a drawn box before anything looked at
+    them. A question like
+
+        Marital Status:  [ ] Divorced  [ ] Legally Separated  [x] Married
+
+    has no rule anywhere on it, so no region existed and the row was invisible. On one
+    real registration form that was 41 tick boxes across 12 rows, of which regions covered
+    2 -- the form's entire demographic section read as prose.
+
+    A row of tick boxes is a question in its own right, so it makes its own field here.
+    """
+    if gray is None:
+        return []
+    fields: list[DetectedFormField] = []
+    for row, names, label_words in choice_rows(checkboxes, claimed, words, candidates):
+        span = Box(
+            min(b.x0 for b in row),
+            min(b.y0 for b in row),
+            max(b.x1 for b in row),
+            max(b.y1 for b in row),
+        )
         label = _clean_question(" ".join(z.text for z in label_words).rstrip(":"))
         mapped, score, reason = match(label)
         ticks = _ticked(row, gray, marks)
@@ -2276,6 +2304,9 @@ def _read_with_template(
     )
     fields = []
     for index, slot in enumerate(slots):
+        if slot.field_type == FieldType.MULTIPLE_CHOICE and slot.option_boxes:
+            # Read by ink in its own boxes, not as text; not yet wired in.
+            continue
         box = slot.bbox
         inside = [
             word
