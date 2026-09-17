@@ -292,3 +292,29 @@ class TestLearningFromCorrections:
             bbox=BoundingBox(x=0.1, y=0.5, width=0.2, height=0.03))])
         assert [p.page_index for p in taught.pages] == [0, 1, 2] and taught.page_count == 3
         assert taught.pages[2].fields[0].field_id == "employment.employer"
+
+
+def test_a_blank_records_its_tick_row_as_a_slot(tmp_path):
+    """A choice is the one answer a blank fully describes: boxes, captions and question."""
+    import cv2
+
+    from app.services.template_builder import _choice_slots
+    from app.services.word_source import Word
+
+    page = np.full((1650, 1275, 3), 255, dtype=np.uint8)  # a letter page at 150dpi
+    for x in (400, 560):  # two option boxes on one line
+        cv2.rectangle(page, (x, 300), (x + 16, 316), (0, 0, 0), 1)
+    image = tmp_path / "blank.png"
+    cv2.imwrite(str(image), page)
+    words = [
+        Word(300, 300, 390, 316, "Gender:", 1, 0.95),
+        Word(422, 300, 470, 316, "Male", 1, 0.95),
+        Word(582, 300, 640, 316, "Female", 1, 0.95),
+    ]
+
+    slots = _choice_slots(image, words, 1275, 1650, set())
+
+    assert [s.label for s in slots] == ["Gender"]
+    assert slots[0].options == ["Male", "Female"]
+    assert len(slots[0].option_boxes) == 2
+    assert slots[0].field_type.value == "multiple_choice"

@@ -76,6 +76,10 @@ class TemplateField(BaseModel):
     normalizer: str | None = None
     review_threshold: float = Field(default=0.75, ge=0, le=1)
     options: list[str] = Field(default_factory=list)
+    # Where each option's tick box is, as page fractions, for a slot the blank taught as a
+    # choice: a filled copy is then read by measuring ink in these boxes, under the caption
+    # and the question the blank prints, instead of working the row out again on every copy.
+    option_boxes: list[BoundingBox] = Field(default_factory=list)
     pattern: str | None = None
 
 
