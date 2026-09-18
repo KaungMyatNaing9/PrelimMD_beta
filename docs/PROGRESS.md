@@ -3311,3 +3311,36 @@ normalised value is matched now; and a garbage "Mo F o" read across "M [ ] F [ ]
 printed F -- a text value whose answer region holds a row of tick boxes is never lifted.
 
 Templates learned before this change keep their white-box masters until learned again.
+
+
+### Ticks read through the enrolled template (2026-09-18)
+
+A choice is the one answer a blank describes completely: where the boxes are, what each is
+called, what the question is. Every filled copy was working all three out again, which is
+where most tick answers were lost, so enrolment now records the rows as slots
+(`TemplateField.option_boxes`, captions grown by `option_phrase`) and a matched copy is
+read by measuring ink in them (`_choice_through_slot`). The row finder is shared with the
+page's own reading (`choice_rows`), so the two cannot drift apart.
+
+Two rules decide what the reading is worth, both measured on the same 109 enrolled
+templates, scored from one snapshot so only the reading side differs:
+
+| ticks read, of 417 | slots ignored | taught row leads | taught row only adds | + blank comparison |
+|---|---|---|---|---|
+| all | 78.2% | 78.4% | **80.1%** | **80.1%** |
+| PDFs | 80.6% | 78.7% | 82.1% | 82.1% |
+| photographs | 73.8% | 77.9% | 76.5% | 76.5% |
+| wrong option or text | 4.6% | 6.5% | 4.8% | 4.8% |
+| precision, every field | 94.6% | 93.3% | 93.6% | 94.4% |
+
+*Letting a taught row lead* loses as much on PDFs as it gains on photographs: the page's
+own reading of a vector-drawn row is already good, and displacing it costs whenever the
+template's ink measure is wrong. Additive, as every inferred slot already is, it gains on
+both. *A mark is ink the blank does not print in that box* (`MARK_ADDED`, measured against
+the stored master): judged against the row alone, rows whose boxes the form prints
+something inside reported ticks on copies that carry none -- 41 such values on LARGE_B,
+whose fills have no ticks at all. The comparison took 30 of them out and cost no tick.
+
+Corrected track with fresh enrolment, no model: **91.8 / 94.2**, from 91.7 / 94.4 -- three
+fields gained, none lost, four more values proposed. Zero-shot on the same ticked copies
+reads 75.5%, so enrolment is worth 4.6 points of ticks on top of it.

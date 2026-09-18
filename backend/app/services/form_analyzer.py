@@ -35,7 +35,7 @@ from app.services.field_validity import plausible
 from app.services.fusion import fuse
 from app.services.relinker import available as relink_available
 from app.services.relinker import relink
-from app.services.templates import MATCH_THRESHOLD, registry
+from app.services.templates import MATCH_THRESHOLD, canonical_image_path, registry
 from app.services.vision_extractor import available as vision_available
 from app.services.vision_extractor import extract as vision_extract
 from app.services.vision_extractor import slot_vision_available, transcribe_strips
@@ -1977,6 +1977,7 @@ class FormAnalyzer:
                     matched_page + index,
                     source.image,
                     source.source,
+                    source.marks,
                 )
                 if guided:
                     # The same furniture rules the page's reading has already been
@@ -2261,6 +2262,71 @@ def _same_place(a: BoundingBox, b: BoundingBox) -> bool:
     return _inside(a, b) or _inside(b, a)
 
 
+# How much more ink than the blank prints in the same box counts as a mark. A ticked box
+# on the benchmark's copies carries about nine percent of its area in ink and an empty one
+# none, so this sits well below a mark and above scan noise.
+MARK_ADDED = 0.03
+
+
+def _choice_through_slot(
+    slot: TemplateField,
+    index: int,
+    page_index: int,
+    gray,
+    blank,
+    w: float,
+    h: float,
+    marks: tuple[PdfMark, ...],
+) -> DetectedFormField:
+    """Which of a taught row's boxes this copy ticked, named by the blank's own captions.
+
+    A mark is ink the blank does not print in that box. Judged against the row alone, a
+    row whose boxes the form prints something inside, or which a value was written across,
+    reported a tick on copies where nobody ticked anything: 41 such values on the benchmark,
+    whose fills carry no ticks at all. The blank is the same form, so the comparison is
+    exact wherever it is registered.
+    """
+    boxes = [
+        Box(b.x * w, b.y * h, (b.x + b.width) * w, (b.y + b.height) * h) for b in slot.option_boxes
+    ]
+    ticks = _ticked(boxes, gray, marks)
+    if blank is not None:
+        bh, bw = blank.shape[:2]
+        printed = [
+            ink_ratio(blank, Box(b.x * bw, b.y * bh, (b.x + b.width) * bw, (b.y + b.height) * bh))
+            for b in slot.option_boxes
+        ]
+        ticks = [
+            take and ink_ratio(gray, box) - was >= MARK_ADDED
+            for take, box, was in zip(ticks, boxes, printed)
+        ]
+    chosen = [name for name, take in zip(slot.options, ticks) if take]
+    answer = ", ".join(c for c in chosen if c) or None
+    mapped, score, reason = match(slot.label)
+    return DetectedFormField(
+        field_id=f"tpl_{index}",
+        page_index=page_index,
+        label_text=slot.label,
+        normalized_label=norm(slot.label),
+        field_type=FieldType.MULTIPLE_CHOICE,
+        label_bbox=slot.bbox,
+        answer_bbox=slot.bbox,
+        required_status=RequiredStatus.UNKNOWN,
+        required_confidence=0.3,
+        detection_confidence=0.9,
+        source="reviewer" if slot.taught else "template",
+        canonical_key=mapped.canonical_key if mapped else slot.field_id,
+        mapping_confidence=score,
+        mapping_reason=reason,
+        raw_value=answer,
+        normalized_value=answer,
+        is_blank=answer is None,
+        confidence=0.9 if answer else 0.6,
+        needs_review=answer is None,
+        ticked_boxes=[b for b, take in zip(slot.option_boxes, ticks) if take],
+    )
+
+
 def _read_with_template(
     template_id: str,
     words: list[Word],
@@ -2269,6 +2335,7 @@ def _read_with_template(
     page_index: int,
     image: Path | None = None,
     source: str = "",
+    marks: tuple[PdfMark, ...] = (),
 ) -> list[DetectedFormField]:
     """Read a page through a layout that has already been understood once.
 
@@ -2303,9 +2370,19 @@ def _read_with_template(
         else None
     )
     fields = []
+    gray = None
+    blank = None
     for index, slot in enumerate(slots):
         if slot.field_type == FieldType.MULTIPLE_CHOICE and slot.option_boxes:
-            # Read by ink in its own boxes, not as text; not yet wired in.
+            # A choice is read by ink in the boxes the blank recorded, under the captions
+            # and the question it prints, instead of finding the row again on this copy.
+            if gray is None and image is not None:
+                gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
+            if blank is None:
+                blank = cv2.imread(str(canonical_image_path(template_id, page_index)), cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                continue
+            fields.append(_choice_through_slot(slot, index, page_index, gray, blank, w, h, marks))
             continue
         box = slot.bbox
         inside = [
