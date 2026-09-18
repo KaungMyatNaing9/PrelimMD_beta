@@ -3344,3 +3344,28 @@ whose fills have no ticks at all. The comparison took 30 of them out and cost no
 Corrected track with fresh enrolment, no model: **91.8 / 94.2**, from 91.7 / 94.4 -- three
 fields gained, none lost, four more values proposed. Zero-shot on the same ticked copies
 reads 75.5%, so enrolment is worth 4.6 points of ticks on top of it.
+
+**Two ideas that measured as nothing, and are not in the code.** Rows split by a line to
+write on ("[ ] Yes - date: ______ [ ] No") looked like 21 lost ticks in the stage trace, so
+the page's detected write rules were counted as filled space when grouping a row, and a
+label followed by one still divided it. Zero-shot on the ticked copies: 315 of 417 read,
+identical to without it, two artefacts changed and nothing on balance. The forms that split
+write their lines as underscore *characters*, which already counted, or as lines the
+detector does not find between boxes. Re-reading a caption OCR glued to its box whatever
+confidence it reported (the assignment still needs OCR's doubt, since a letter can pass for
+a box) was also exactly identical, 315 of 417. Both reverted; a stage trace says where a
+tick was lost, not that the cause it suggests is the one that costs the answer.
+
+**Held out.** `UNSEEN_TICK`: UNSEEN's 21 blanks filled with `--tick`, 68 ticked questions on
+26 artefacts, built after the tick work and locked like the rest of UNSEEN. No rule was ever
+fitted to these forms' ticks:
+
+| ticks read | LARGE_TICK_B (417) | UNSEEN_TICK (68) |
+|---|---|---|
+| zero-shot | 75.5% | 72.1% |
+| enrolled | 80.1% | **79.4%** |
+| enrolled, PDFs | 82.1% | 82.2% |
+| enrolled, photographs | 76.5% | 73.9% |
+
+At 68 ticks a point is two thirds of an answer, so read it as "the benchmark's figure holds
+on forms it was never fitted to", not as a second decimal place.
