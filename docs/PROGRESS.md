@@ -3479,3 +3479,39 @@ oracle positions is unchanged at 91.8% / 94.1%.
 The 40 still unread are 22 questions no template taught a row for and the page never found
 either, and 17 where the row is taught and the ink test reports no mark. The second of those
 is the next thing to look at.
+
+## 2026-09-19 — A patient's answers in the printed layer: measured, and reverted
+
+A template learned from a filled copy records that patient's answers in `printed_words`,
+the layer a reader uses to clear values that are "the blank's own printing where the blank
+prints it". Found by driving the staff app: the copy a template was learned from, read
+again through it, came back with **one** of its eleven values. Every other one matched the
+recorded printing and was cleared.
+
+The fix tried was to drop every word inside a lifted answer region, since the template
+already records where answer ink was lifted to make its master. It does fix the fault --
+that page re-read at 10 values instead of 1, and the one still dropped is OCR garbage off a
+tick row that ought to go. **Measured on the no-blank track** (`LARGE_SELF` -> `LARGE_B`:
+a template from patient A's filled copy, scored on patient B's copy of the same form):
+
+| | before | after |
+|---|---|---|
+| recall | 90.2% | 91.5% |
+| precision | **94.0%** | **82.9%** |
+
+Reverted. A lifted region is a *box*, and the words inside it include the form's own
+captions; removing those stopped them suppressing the junk they were there to suppress --
+2874 proposed values became 3264, some four hundred more that are no answer at all. A point
+of recall does not buy eleven of precision, least of all on the track that exists for
+clinics with no blank form. The corrected track, which enrols from blanks and so has no
+lifted ink in its layer, did not move: 91.8 / 94.1 either way, as it should be.
+
+**The narrower fix, not attempted.** Take out only the words *of the value that was lifted*,
+within its region, rather than every word in the box. `_layer_without` already does exactly
+that for a reviewer's correction (2026-09-16), so the mechanism exists and is measured in
+its other use. It is left undone rather than guessed at.
+
+What the episode did leave behind: a form naming a template the registry no longer has now
+derives one instead of refusing, which is worth more than it sounds -- 40 of the 50 forms
+stored in a working backend answered "Unknown template" to a request for a copy of
+themselves.
