@@ -3388,10 +3388,11 @@ It needs no server, `--shard 2/3` splits it across processes, and `--backend DIR
 same measure of another checkout, which is how the before and after below were taken.
 
 **Before**, on committed code: **126 values written over the form's own printing, on 47 of
-107 forms**. **After: every class zero, on all 111 forms and every page of each.** Two forms
-are excluded by enrolment itself, which refuses a page it can find no answer region on.
+107 forms**. **After: every class zero, on all 111 forms and every page of each** -- on the
+plain fills and on the ticked copies, where the tick classes are the ones that bite. Two
+forms are excluded by enrolment itself, which refuses a page it can find no answer region on.
 
-Six faults, each general and each found by the audit rather than by eye:
+Seven faults, each general and each found by the audit rather than by eye:
 
 - *A value over the form's printing* (the whole 126). An answer region can reach across the
   caption of the row below it, or be drawn around a caption instead of the space after it.
@@ -3403,7 +3404,9 @@ Six faults, each general and each found by the audit rather than by eye:
   reports (measured: 1.053 up, 0.281 down).
 - *A value running off the paper.* "Reference Librarian" arrived as "Reference Librari": a
   value set at the size the form was filled at can be longer than the page, and what passed
-  the edge was simply lost. It is set smaller instead, and never cut.
+  the edge was simply lost. It is set smaller instead, and never cut. Moving a value right
+  past printing can put it there too, since shrinking has a floor -- "Apt/Trailer" arrived
+  as "Apt" -- so it is never moved onto ground it cannot fit on.
 - *A character the face cannot draw.* The renderer does not refuse one: it puts another
   glyph in its place, so a reader that took a form's own empty box into a value
   ("...@example.com ▢") had the copy print a letter that was never on the original.
