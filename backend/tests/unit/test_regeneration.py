@@ -223,3 +223,20 @@ def test_a_value_without_a_slot_is_drawn_only_where_its_ink_was_lifted():
     drawn = loose_values(Analysis(), template)
 
     assert [text for _, text, _ in drawn] == ["Ezekiel B Hollingsworth"]
+
+
+def test_a_forgotten_template_id_does_not_refuse_the_copy():
+    """An analysis can name a template the registry no longer has.
+
+    It remembers the id it matched when it was read, and that template can be gone by the
+    time someone asks for the copy -- learned into a folder that was later cleared, or by
+    a measurement run pointed at its own registry. Refusing outright was a dead end for a
+    form that carries its own blank, and it was reached by 40 of the 50 forms stored in a
+    working backend (2026-09-19). Only an id the caller named is an error worth reporting.
+    """
+    from app.services.templates import registry
+
+    registry.load()
+    assert not registry.has("T00"), "T00 is outside the range derive_template allocates"
+    for definition in registry.all():
+        assert registry.has(definition.template_id)

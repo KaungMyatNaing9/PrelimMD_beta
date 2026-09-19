@@ -121,6 +121,16 @@ class TemplateRegistry:
             self.load()
         return self._templates[template_id]
 
+    def has(self, template_id: str) -> bool:
+        """Whether this id is one the registry can actually hand over.
+
+        An analysis remembers the template it matched when it was read, and that template
+        can be gone by the time someone asks for a copy of the form.
+        """
+        if not self._templates:
+            self.load()
+        return template_id in self._templates
+
     def all(self) -> list[TemplateDefinition]:
         if not self._templates:
             self.load()

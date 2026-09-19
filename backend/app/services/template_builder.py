@@ -644,7 +644,7 @@ def _learn_page(
         canonical_width=width,
         canonical_height=height,
         fields=fields + choices,
-        printed_words=_printed_layer(pdf, index, page_words, width, height),
+        printed_words=_printed_layer(pdf, index, page_words, width, height, inked),
         printed_spans=_printed_spans(pdf, index, page_words, width, height, inked),
         lifted=[
             BoundingBox(x=x0 / width, y=y0 / height, width=(x1 - x0) / width, height=(y1 - y0) / height)
@@ -791,17 +791,31 @@ def _layer_without(
 
 
 def _printed_layer(
-    pdf: Path | None, index: int, page_words: list, width: int, height: int
+    pdf: Path | None, index: int, page_words: list, width: int, height: int, inked: Sequence = ()
 ) -> list[tuple[str, float, float]]:
     """What the form this template is learned from prints, word by word, in page fractions.
 
     A PDF's own text layer where there is one -- exact, where OCR of the render drops and
-    splits words -- and the render's OCR otherwise. Learned from the blank, this is the
-    form's furniture; learned from a filled copy it would also hold that patient's
-    answers, which is one more reason enrolment starts from the blank.
+    splits words -- and the render's OCR otherwise.
+
+    Learned from a blank this is the form's furniture. Learned from a filled copy it would
+    also hold that patient's answers, and a reader clears any value that is "the blank's
+    printing where the blank prints it" (`_blank_printing`) -- so the copy those answers
+    came from, read again, lost every one of them, and a later copy lost any value that
+    happened to match ("CA", "English", a shared city). ``inked`` is where the answers were
+    lifted to make the master, in page pixels; what was lifted was the patient's, not the
+    form's.
     """
     words, w, h = _layer_words(pdf, index, page_words, width, height)
-    return _as_layer(words, w, h)
+    layer = _as_layer(words, w, h)
+    if not inked:
+        return layer
+    lifted = [(x0 / width, y0 / height, x1 / width, y1 / height) for x0, y0, x1, y1 in inked]
+    return [
+        (text, cx, cy)
+        for text, cx, cy in layer
+        if not any(lx0 <= cx <= lx1 and ly0 <= cy <= ly1 for lx0, ly0, lx1, ly1 in lifted)
+    ]
 
 
 def _layer_words(

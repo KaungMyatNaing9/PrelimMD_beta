@@ -559,11 +559,20 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
     """Fill this analysis's stored values onto its blank template, as a PDF."""
     analysis = get_form_analysis(analysis_id)
     chosen = template_id or analysis.matched_known_template
+    # A form nobody has seen before has no blank master, and requiring a separate call to
+    # learn one meant an unseen form could not be regenerated without a person driving the
+    # API. The form itself carries everything the master needs, so derive it here: the
+    # values are erased out of the page and what is left is the blank.
+    #
+    # A form that names a template the registry no longer has takes the same road. An
+    # analysis remembers the id it matched when it was read, and that template can be gone
+    # -- learned into a folder that was cleared, or by a run pointed at its own registry --
+    # and the copy was then refused outright, which is a dead end for a form that carries
+    # its own blank. Only an id the *caller* named is an error worth reporting, because
+    # nothing else can have meant it.
+    if chosen and template_id is None and not registry.has(chosen):
+        chosen = None
     if not chosen:
-        # A form nobody has seen before has no blank master, and requiring a separate call
-        # to learn one meant an unseen form could not be regenerated without a person
-        # driving the API. The form itself carries everything the master needs, so derive
-        # it here: the values are erased out of the page and what is left is the blank.
         chosen = _derive_for(analysis_id, analysis)
     try:
         template = registry.get(chosen)
