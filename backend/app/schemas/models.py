@@ -107,6 +107,11 @@ class TemplatePage(BaseModel):
     # of 731 junk values on the benchmark's corrected track were exactly that
     # (2026-09-16). Empty on templates learned before it existed.
     printed_words: list[tuple[str, float, float]] = Field(default_factory=list)
+    # The box every printed word covers, as (x0, y0, x1, y1) page fractions. Regeneration
+    # keeps a value off them: an answer region can reach across the caption of the line
+    # below it, and a value drawn from the region's left edge then hid the form's own
+    # words. Empty on templates learned before it existed, which simply draw as they did.
+    printed_spans: list[tuple[float, float, float, float]] = Field(default_factory=list)
     # Where a patient's answers were lifted off this page to make its master, as page
     # fractions: only on a template learned from a filled copy. A value no slot takes is
     # regenerated where it was read only if its ink was lifted there; otherwise the reader's

@@ -45,7 +45,7 @@ from app.services.templates import DERIVED_ROOT, preview_name, registry
 from app.services.vision_extractor import available as vision_available
 from app.services.vision_extractor import extract as vision_extract
 from app.services.vision_extractor import locate_values
-from app.services.word_source import group_lines_tolerant, words_from_image
+from app.services.word_source import group_lines_tolerant, words_from_image, words_from_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -607,7 +607,7 @@ def _learn_page(
     fill_size = sorted(measured)[len(measured) // 2] if len(measured) >= MIN_FILL_MEASUREMENTS else None
     used: set[str] = set()
     fields = []
-    choices = _choice_slots(page_image, page_words, width, height, used)
+    choices = _choice_slots(page_image, page_words, width, height, used, pdf, index)
     for field in boxed:
         # Real forms repeat a caption per section — "Name" and "Phone Number" appear
         # under primary insurance, secondary insurance and emergency contact alike. Two
@@ -645,6 +645,7 @@ def _learn_page(
         canonical_height=height,
         fields=fields + choices,
         printed_words=_printed_layer(pdf, index, page_words, width, height),
+        printed_spans=_printed_spans(pdf, index, page_words, width, height, inked),
         lifted=[
             BoundingBox(x=x0 / width, y=y0 / height, width=(x1 - x0) / width, height=(y1 - y0) / height)
             for x0, y0, x1, y1 in inked
@@ -659,7 +660,13 @@ TAUGHT_LAYER_MARGIN = 0.012
 
 
 def _choice_slots(
-    page_image: Path, words: list, width: float, height: float, used: set[str]
+    page_image: Path,
+    words: list,
+    width: float,
+    height: float,
+    used: set[str],
+    pdf: Path | None = None,
+    index: int = 0,
 ) -> list[TemplateField]:
     """The page's tick-box questions as slots: the boxes, their captions, the question.
 
@@ -667,7 +674,15 @@ def _choice_slots(
     each is called and what the question is. Recording it means a filled copy is read by
     measuring ink in known boxes, instead of finding the row, its captions and its question
     again on every copy -- which is where most tick answers were lost.
+
+    A PDF blank's own text layer names the options, where OCR of its render calls them
+    "ves" and "L]ves": 19 ticked answers on the benchmark's ticked copies were read under a
+    caption that did not match the option, all of them OCR's spelling of it. The boxes are
+    still found on the render, which is the only place a drawn box exists.
     """
+    printed = _pdf_words(pdf, index, width, height)
+    if printed:
+        words = printed
     from app.services.form_analyzer import choice_rows
 
     boxes = detect_checkboxes(page_image, words)
@@ -682,7 +697,12 @@ def _choice_slots(
         mapped, _, _ = match(label)
         base = mapped.canonical_key if mapped else _slug(label, used)
         if base in used:
-            continue
+            # A row is not dropped for want of a free key. A form asks "Yes / No" a dozen
+            # times and its text slots have already claimed the obvious names, and a row
+            # thrown away here is a question the copy has to find for itself -- which is
+            # where ticked answers were being lost. The suffixed key still carries the
+            # boxes, the option names and the question, which is what reading a tick needs.
+            base = _slug(f"{label} choice", used)
         used.add(base)
         span = (min(b.x0 for b in row), min(b.y0 for b in row), max(b.x1 for b in row), max(b.y1 for b in row))
         slots.append(
@@ -705,6 +725,27 @@ def _choice_slots(
             )
         )
     return slots
+
+
+def _pdf_words(pdf: Path | None, index: int, width: float, height: float) -> list:
+    """A PDF page's own words, in the pixels of the render the template is measured in."""
+    if pdf is None:
+        return []
+    try:
+        page = pdf_backend.open_page(pdf, index)
+        try:
+            words, w = words_from_pdf(page), page.width
+        finally:
+            page.close()
+    except Exception:  # noqa: BLE001 - no text layer to offer; OCR of the render stands
+        return []
+    if not words or not w:
+        return []
+    scale = width / w
+    return [
+        word._replace(x0=word.x0 * scale, y0=word.y0 * scale, x1=word.x1 * scale, y1=word.y1 * scale)
+        for word in words
+    ]
 
 
 def _without_tokens(text: str | None, value: str) -> str | None:
@@ -759,6 +800,14 @@ def _printed_layer(
     form's furniture; learned from a filled copy it would also hold that patient's
     answers, which is one more reason enrolment starts from the blank.
     """
+    words, w, h = _layer_words(pdf, index, page_words, width, height)
+    return _as_layer(words, w, h)
+
+
+def _layer_words(
+    pdf: Path | None, index: int, page_words: list, width: int, height: int
+) -> tuple[list, float, float]:
+    """The words of the page's own text layer where it has one, its OCR otherwise."""
     if pdf is not None:
         try:
             page = pdf_backend.open_page(pdf, index)
@@ -769,8 +818,64 @@ def _printed_layer(
         except Exception:  # noqa: BLE001 - no text layer to offer; fall back to OCR
             words, w, h = [], 0.0, 0.0
         if words and w and h:
-            return _as_layer(words, w, h)
-    return _as_layer(page_words, width, height)
+            return words, w, h
+    return page_words, float(width), float(height)
+
+
+def _printed_spans(
+    pdf: Path | None, index: int, page_words: list, width: int, height: int, inked: Sequence = ()
+) -> list[tuple[float, float, float, float]]:
+    """The box each printed word occupies, in page fractions.
+
+    The same words as ``_printed_layer``, kept whole rather than split at punctuation:
+    regeneration uses them to keep a value off the form's own printing, and for that what
+    matters is the space a word takes up, not what it says.
+
+    ``inked`` is where this page's answers were lifted to make its master, in page pixels.
+    Those words are the patient's, not the form's, and the master no longer carries them:
+    counted as printing, they would push a regenerated value off the very place it was
+    read from.
+    """
+    words, w, h = _layer_words(pdf, index, page_words, width, height)
+    lifted = [(x0 / width, y0 / height, x1 / width, y1 / height) for x0, y0, x1, y1 in inked]
+    spans = []
+    for word in words:
+        span = _without_rule(word)
+        if not span:
+            continue
+        x0, x1 = span[0] / w, span[1] / w
+        y0, y1 = word.y0 / h, word.y1 / h
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if any(lx0 <= cx <= lx1 and ly0 <= cy <= ly1 for lx0, ly0, lx1, ly1 in lifted):
+            continue
+        spans.append((round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)))
+    return spans
+
+
+# A rule a form draws with characters: "DOB:______________" is one word to a text layer,
+# and its box covers the whole line the answer is meant to go on.
+RULE_RUN = re.compile(r"[_.·•─-╿-]{3,}")
+
+
+def _without_rule(word) -> tuple[float, float] | None:
+    """A printed word's horizontal extent, less any rule drawn as part of it."""
+    text = word.text.strip()
+    if not text:
+        return None
+    kept = max(RULE_RUN.split(word.text), key=len, default="")
+    # A word is something with a letter or a digit in it. The separators a form prints
+    # inside a field -- the "-" of an SSN rule, a stray colon -- hide nothing a reader
+    # needs, and keeping a value off them only pushes it out of the space it belongs in.
+    if not any(ch.isalnum() for ch in kept):
+        return None
+    start = word.text.index(kept)
+    span = word.x1 - word.x0
+    # Where in the word the kept part lies, by character count: a text layer gives one box
+    # for the whole word, so this is the only measure of it there is.
+    return (
+        word.x0 + span * start / len(word.text),
+        word.x0 + span * (start + len(kept)) / len(word.text),
+    )
 
 
 def _as_layer(words: list, width: float, height: float) -> list[tuple[str, float, float]]:

@@ -2209,6 +2209,22 @@ def _merge_template(
     asked |= {norm(f.label_text) for f in kept if _answered(f)}
     for slot in guided:
         overlapping = [f for f in kept if _same_place(slot.answer_bbox, f.answer_bbox)]
+        # A tick row is the exception to "the page leads". The page has to read a row's
+        # option names off the copy, where a taught row was given them by the blank -- so
+        # the page answers "1No" for a box read as a digit, "X}M" for a ticked one, "Yes
+        # or No" for a row it read as one caption, and a right answer is thrown away on
+        # its spelling. Which box carries ink is the taught row's own reading, measured
+        # against the blank, so where both read the same row the blank's names win.
+        # 32 of the 81 ticked questions missed on the benchmark's ticked copies were this
+        # (2026-09-18). Only a row against a row: a taught slot never displaces a value
+        # read as text, which is the rule that cannot lose.
+        if _answered(slot) and slot.field_type == FieldType.MULTIPLE_CHOICE:
+            same_row = [f for f in overlapping if f.field_type == FieldType.MULTIPLE_CHOICE]
+            if same_row:
+                at = kept.index(same_row[0])
+                kept = [f for f in kept if f not in same_row]
+                kept.insert(at, slot)
+                continue
         if any(_answered(f) for f in overlapping):
             continue
         if overlapping and not _answered(slot):

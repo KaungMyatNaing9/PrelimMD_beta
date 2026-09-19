@@ -3369,3 +3369,110 @@ fitted to these forms' ticks:
 
 At 68 ticks a point is two thirds of an answer, so read it as "the benchmark's figure holds
 on forms it was never fitted to", not as a second decimal place.
+
+## 2026-09-18 — What a regenerated copy can get wrong, counted and driven to zero
+
+Placement is measured in millimetres and a round trip in values that survive, but neither
+asks the question a clinic would: *does the copy say anything the original did not?*
+`scripts/evaluate_regeneration.py` regenerates every real blank from its own filled copy,
+reads the result back and counts, per form and per page:
+
+* **dropped** -- a value the reader found that is neither drawn nor reported as unplaced.
+* **not written / written twice** -- the words on the copy are not the words it planned to
+  write, one for one.
+* **over printing** -- a drawn value covering a word the form prints.
+* **loose tick / ticks not drawn / tick moved** -- an X where the blank prints no box, an X
+  too many or too few, or an X on a box other than the one the reader named.
+
+It needs no server, `--shard 2/3` splits it across processes, and `--backend DIR` takes the
+same measure of another checkout, which is how the before and after below were taken.
+
+**Before**, on committed code: **126 values written over the form's own printing, on 47 of
+107 forms**. **After: every class zero, on all 111 forms and every page of each.** Two forms
+are excluded by enrolment itself, which refuses a page it can find no answer region on.
+
+Six faults, each general and each found by the audit rather than by eye:
+
+- *A value over the form's printing* (the whole 126). An answer region can reach across the
+  caption of the row below it, or be drawn around a caption instead of the space after it.
+  Regeneration now knows where the form prints (`TemplatePage.printed_spans`, the box of
+  every printed word, less the patient's own ink where the master was lifted) and keeps off
+  it: a value that would cover printing steps along its line past the printing, a word at a
+  time; then to a clear line inside its region; then is set smaller, down to half. The box
+  it checks is the face's own ascent and descent, which is exactly what a reader of the page
+  reports (measured: 1.053 up, 0.281 down).
+- *A value running off the paper.* "Reference Librarian" arrived as "Reference Librari": a
+  value set at the size the form was filled at can be longer than the page, and what passed
+  the edge was simply lost. It is set smaller instead, and never cut.
+- *A character the face cannot draw.* The renderer does not refuse one: it puts another
+  glyph in its place, so a reader that took a form's own empty box into a value
+  ("...@example.com ▢") had the copy print a letter that was never on the original.
+  Characters a base font cannot set are dropped before drawing.
+- *"False" printed on a form.* A boolean in a slot the template does not call a checkbox was
+  drawn as the word. A yes/no answer is a mark or nothing at all, whatever slot it lands in.
+- *A value reported as unplaced when it was placed.* The same value sits under its canonical
+  key and under one made from its caption, and only the canonical one matches a slot; on one
+  packet, four of five "unplaced" values were on the copy all along.
+- *A rule the form draws with characters.* "DOB______________" is one word to a text layer
+  and the box it reports covers the whole line the answer belongs on, so anything reasoning
+  about where a form prints has to drop those runs first -- as it must drop a lone "-" or
+  ":", which hides nothing.
+
+**And the copy is now the whole packet.** Regeneration wrote one page; of the 5730 slots on
+the benchmark's 109 enrolled templates, **2772 are on a page after the first**, and every
+answer on them was left off the copy without a word -- `unplaced` only looked at page one
+too. `regenerate` draws every page the template has, each on its own master
+(`pdf_backend.compose_pages`: one canvas, a page size and a background image per page), with
+ticks and slotless values given per page.
+
+Round trip and placement are unchanged by all of this: 20/23 values survive (87.0%), 15/21
+within 2mm, median 1.29mm.
+
+## 2026-09-18 — Ticks: read in the blank's words, not the copy's
+
+A census of every ticked question the benchmark's copies did not read correctly (81 of 417)
+put them in four classes, and the two biggest were not what the enrolment work had assumed.
+Enrolment is not where ticks are lost: rendering all 40 ticked blanks and running
+`choice_rows` over them finds a row for 250 of the 268 questions the filler ticked. What a
+blank finds and then throws away is the loss.
+
+**The option names come from the blank's own text layer.** `_choice_slots` learned a row's
+options from OCR of the blank's *render*, which is where the boxes are but not where the
+words are: OCR of a box glued to its caption reads "L]Yes", "ves", "0 No". A copy answered
+under a caption that does not match the option counts as wrong. The boxes are still found on
+the render, which is the only place a drawn box exists; a blank with no text layer is
+enrolled exactly as before.
+
+**A taught row answers in the blank's words** (`_merge_template`). The rule was that the
+page's own reading leads and a template may only add to it -- a slot's box can catch the
+caption beside it and replace a good free-text value with a bad one. That rule now has one
+exception: a tick row against a tick row. Where a taught row read a tick and the page read a
+choice at the same place, the taught row wins, because it was given its option names by the
+blank and decides which box is marked by comparing ink with the blank -- neither of which
+depends on reading the copy's small print. The page had been answering "1No" for a box read
+as a digit, "X}M" for a ticked one, "Yes or No" for a row read as one caption: right box,
+wrong words, 32 of the 81 misses. A taught slot still never displaces a value read as text.
+
+**A row is not dropped for want of a free key.** `_choice_slots` dropped any row whose field
+key was already taken, and a form that asks "Yes / No" a dozen times runs out of names; the
+row now takes a suffixed key. It rescues about five rows across the whole benchmark, which
+is small, but a dropped row is a question the copy has to find for itself.
+
+**Measured** on `LARGE_TICK_B` (417 ticked questions on 112 forms, each enrolled from its own
+blank, no corrections taught):
+
+| ticks read | before | after |
+|---|---|---|
+| all | 80.1% | **86.1%** |
+| PDFs | 82.1% | 84.7% |
+| photographs | 76.5% | **88.6%** |
+
+Not read fell 66 -> 40, read under the wrong option 20 -> 14, read with other options mixed
+in 20 -> 4, and choice values under questions nobody ticked 19 -> 14. Fields on that set:
+64.4% -> 69.6% recall at 81.9% -> 94.5% precision, the garbage values having mostly been
+OCR's spellings of options. **Regression**: the corrected track on `LARGE`/`LARGE_B` with
+oracle positions is unchanged at 91.8% / 94.1%.
+
+The 40 still unread are 22 questions no template taught a row for and the page never found
+either, and 17 where the row is taught and the ink test reports no mark. The second of those
+is the next thing to look at.
