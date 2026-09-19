@@ -58,6 +58,9 @@ cd backend
 ../.venv312/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+Drop `--reload` when showing the app to anybody: its file watcher sits at around 98% of a
+core on this repository, which is a poor use of a laptop that is also running OCR.
+
 Frontend, in a second:
 
 ```bash
