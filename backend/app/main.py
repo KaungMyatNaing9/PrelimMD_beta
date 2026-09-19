@@ -573,9 +573,15 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
     resolved = values_from_analysis(analysis, template)
     # A template learned from this very upload shares its page, so a value no slot took is
     # drawn where it was read rather than left off the copy.
-    loose = loose_values(analysis, template) if template.derived_from == analysis.analysis_id else []
+    indices = [page.page_index for page in template.pages]
+    loose = (
+        {index: loose_values(analysis, template, index) for index in indices}
+        if template.derived_from == analysis.analysis_id
+        else {}
+    )
+    ticks = {index: ticks_from_analysis(analysis, index) for index in indices}
     try:
-        pdf = regenerate(template, resolved, ticks=ticks_from_analysis(analysis), loose=loose)
+        pdf = regenerate(template, resolved, ticks=ticks, loose=loose)
     except FileNotFoundError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -583,7 +589,7 @@ def regenerate_form(analysis_id: str, template_id: str | None = None):
     # correctly and still have nowhere to go -- a form captioning one region "City/State"
     # leaves a correctly read city unplaceable. Saying which values did not make it turns a
     # silently shorter form into a known one.
-    drawn = {key for _, _, keys in loose for key in keys}
+    drawn = {key for page in loose.values() for _, _, keys in page for key in keys}
     missing = [key for key in unplaced(template, resolved) if key not in drawn]
     return Response(
         pdf,

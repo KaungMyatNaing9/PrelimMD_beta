@@ -6,7 +6,7 @@ value lands where the blank form actually puts it, independent of capture qualit
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +25,34 @@ def _text_for(value: Any, field_type: FieldType | str) -> str | None:
     kind = field_type.value if isinstance(field_type, FieldType) else str(field_type)
     if value is None or value == "":
         return None
+    # A yes/no answer is a mark, whatever slot it landed in: a boolean drawn as text put
+    # the word "False" on a regenerated form.
+    if isinstance(value, bool):
+        return TICK if value else None
     if kind == "checkbox":
-        return TICK if value in (True, "true", "True", 1) else None
+        return TICK if value in ("true", "True", 1) else None
     if kind == "signature_presence":
         return None
-    return str(value)
+    return _drawable(str(value)) or None
+
+
+def _drawable(text: str) -> str:
+    """``text`` with every character the face cannot draw taken out of it.
+
+    The renderer does not refuse a character it has no glyph for: it puts another one in
+    its place. A reader that took a form's own empty box into a value
+    ("...@example.com \u25a2") therefore had the copy print a letter that was never on the
+    original, which is the one thing a copy must not do. What survives is what a base font
+    can set, which is everything these forms are written in.
+    """
+    kept = []
+    for character in text:
+        try:
+            character.encode("cp1252")
+        except UnicodeEncodeError:
+            continue
+        kept.append(character)
+    return " ".join("".join(kept).split())
 
 
 # Safety margin above the font's own descent, as a fraction of the point size. The glyph
@@ -99,9 +122,7 @@ def _font_size(height_pt: float, learned: float | None = None, page_width: float
     return max(6.0 * scale, min(12.0 * scale, height_pt * 0.55))
 
 
-def unplaced(
-    template: TemplateDefinition, values: dict[str, Any], page_index: int = 0
-) -> list[str]:
+def unplaced(template: TemplateDefinition, values: dict[str, Any]) -> list[str]:
     """Values that were read but have nowhere on this template to go.
 
     A template only carries the fields its form was seen to have. Where a form combines
@@ -113,13 +134,25 @@ def unplaced(
     exactly the kind of thing that has to be said out loud.
     """
     slots = {
-        CORPUS_KEY_ALIASES.get(f.field_id, f.field_id) for f in template.pages[page_index].fields
+        CORPUS_KEY_ALIASES.get(f.field_id, f.field_id)
+        for page in template.pages
+        for f in page.fields
+    }
+    # The same value sits under its canonical key and under one made from its printed
+    # caption, and only the canonical one matches a slot. Reported by key alone, a city
+    # drawn on the copy was announced as missing from it.
+    placed = {
+        _text_for(value, FieldType.SHORT_TEXT) for key, value in values.items() if key in slots
     }
     missing: dict[str, str] = {}
     for key, value in values.items():
-        if key in slots:
+        # A yes/no answer is a mark: it is drawn from the boxes the reader says were
+        # ticked, not from a slot, so it is not a value with nowhere to go.
+        if key in slots or isinstance(value, bool):
             continue
         text = _text_for(value, FieldType.SHORT_TEXT)
+        if text in placed:
+            continue
         # "( )" is an empty phone rule, not an answer. Nothing was lost by not placing it,
         # and listing it would bury the values that were.
         if text is None or not any(c.isalnum() for c in text):
@@ -136,11 +169,15 @@ def unplaced(
 def regenerate(
     template: TemplateDefinition,
     values: dict[str, Any],
-    page_index: int = 0,
-    ticks: Sequence[BoundingBox] = (),
-    loose: Sequence[tuple[BoundingBox, str, set[str]]] = (),
+    ticks: Mapping[int, Sequence[BoundingBox]] | Sequence[BoundingBox] = (),
+    loose: Mapping[int, Sequence[tuple[BoundingBox, str, set[str]]]]
+    | Sequence[tuple[BoundingBox, str, set[str]]] = (),
 ) -> bytes:
-    """Render ``values`` onto the blank master for ``template`` and return PDF bytes.
+    """Render ``values`` onto the blank masters for ``template`` and return PDF bytes.
+
+    Every page of the form, because a form is usually a packet: on the benchmark's 109
+    templates, 2772 of 5730 slots are on a page after the first, and a copy of only the
+    first page left every one of those answers off without a word (2026-09-18).
 
     ``values`` is keyed by canonical field key; template fields carry the corpus key, so
     they are translated through CORPUS_KEY_ALIASES on the way in. Values with no slot are
@@ -148,17 +185,65 @@ def regenerate(
 
     ``ticks`` are the boxes a patient ticked, as page fractions (``DetectedFormField.
     ticked_boxes``); each is marked with an X in the box the blank prints there. ``loose``
-    are values with no slot, drawn where they were read (``loose_values``).
+    are values with no slot, drawn where they were read (``loose_values``). Both are given
+    per page, keyed by page index; a plain run of either is taken to be the first page's.
     """
-    blank = canonical_image_path(template.template_id, page_index)
-    if not blank.exists():
+    pages = []
+    for page_def in template.pages:
+        blank = canonical_image_path(template.template_id, page_def.page_index)
+        if not blank.exists():
+            if page_def.page_index == 0:
+                raise FileNotFoundError(f"No blank master for template {template.template_id}")
+            # A packet learned before a later page had a master of its own: the pages that
+            # do have one are still worth regenerating.
+            continue
+        width, height = float(page_def.canonical_width), float(page_def.canonical_height)
+        index = page_def.page_index
+        texts, boxes = plan(template, values, index, _for_page(loose, index))
+        texts += _tick_marks(blank, _for_page(ticks, index), width, height)
+        pages.append(pdf_backend.PageDraw(blank, width, height, texts, boxes))
+    if not pages:
         raise FileNotFoundError(f"No blank master for template {template.template_id}")
+    return pdf_backend.compose_pages(pages, fontname=FONT, color=INK)
 
-    page_def = template.pages[page_index]
+
+def _for_page(per_page, index: int):
+    """What was given for one page: a mapping by page index, or a run meaning the first."""
+    if isinstance(per_page, Mapping):
+        return per_page.get(index, ())
+    return per_page if index == 0 else ()
+
+
+def _page(template: TemplateDefinition, page_index: int):
+    """The template page with this index, which need not be the one at that position."""
+    return next(
+        (page for page in template.pages if page.page_index == page_index),
+        template.pages[page_index],
+    )
+
+
+def plan(
+    template: TemplateDefinition,
+    values: dict[str, Any],
+    page_index: int = 0,
+    loose: Sequence[tuple[BoundingBox, str, set[str]]] = (),
+) -> tuple[list[pdf_backend.Text], list[pdf_backend.TextBox]]:
+    """Exactly what regeneration will write on a page, and where.
+
+    Separate from the drawing so that what was written can be checked against what was
+    asked for: a copy that quietly leaves a value off, or writes one twice, is the kind of
+    mistake nobody sees (`scripts/evaluate_regeneration.py`).
+    """
+    page_def = _page(template, page_index)
     width, height = float(page_def.canonical_width), float(page_def.canonical_height)
-
     texts: list[pdf_backend.Text] = []
     boxes: list[pdf_backend.TextBox] = []
+    # What a value has to keep off: everything the form prints, and then every value
+    # already written on this page.
+    spans = [
+        (sx0 * width, sy0 * height, sx1 * width, sy1 * height)
+        for sx0, sy0, sx1, sy1 in page_def.printed_spans
+    ]
     for field in page_def.fields:
         canonical = CORPUS_KEY_ALIASES.get(field.field_id, field.field_id)
         text = _text_for(values.get(canonical), field.field_type)
@@ -178,20 +263,150 @@ def regenerate(
         # identically on every correctly placed field. Setting the baseline directly puts
         # the value back on the rule. Shrinking the box instead silently renders nothing
         # when the text no longer fits.
-        drawn = _width_matched(text, size)
-        texts.append(
-            pdf_backend.Text(x0 + _indent(field, size, width), y1 - drawn * _descent(FONT), text, drawn)
+        start, baseline, drawn = _place(
+            text,
+            _width_matched(text, size),
+            x0 + _indent(field, size, width),
+            y1,
+            (x0, y0, x1, y1),
+            spans,
+            width,
         )
+        texts.append(pdf_backend.Text(start, baseline, text, drawn))
+        spans.append(_written(texts[-1]))
     learned = next((f.font_size for f in page_def.fields if f.font_size), None)
     for bbox, text, _ in loose:
-        x0, y1 = bbox.x * width, (bbox.y + bbox.height) * height
+        x0, y0 = bbox.x * width, bbox.y * height
+        x1, y1 = (bbox.x + bbox.width) * width, (bbox.y + bbox.height) * height
         # The page's fill size where it was measured; otherwise the read words' own height,
         # which runs from ascender to descender and is a little more than their size.
-        size = learned * height if learned else max(bbox.height * height * LOOSE_SIZE, 6.0 * width / LETTER_WIDTH_PT)
-        drawn = _width_matched(text, size)
-        texts.append(pdf_backend.Text(x0, y1 - drawn * _descent(FONT), text, drawn))
-    texts += _tick_marks(blank, ticks, width, height)
-    return pdf_backend.compose(blank, width, height, texts, boxes, fontname=FONT, color=INK)
+        floor = 6.0 * width / LETTER_WIDTH_PT
+        size = learned * height if learned else max((y1 - y0) * LOOSE_SIZE, floor)
+        start, baseline, drawn = _place(
+            text, _width_matched(text, size), x0, y1, (x0, y0, x1, y1), spans, width
+        )
+        texts.append(pdf_backend.Text(start, baseline, text, drawn))
+        spans.append(_written(texts[-1]))
+    return texts, boxes
+
+
+def _written(text: pdf_backend.Text) -> tuple[float, float, float, float]:
+    """The box a drawn value fills, so the next one keeps off it.
+
+    Two answers written up against each other read back as one word -- an email address
+    and the phone number after it as "...@example.com509-555-0186" -- which is a copy
+    saying something the original did not just as much as a value over a caption is.
+    """
+    return (
+        text.x,
+        text.baseline - pdf_backend.font_ascender(FONT) * text.size,
+        text.x + pdf_backend.text_length(text.text, FONT, text.size),
+        text.baseline + _descent(FONT) * text.size,
+    )
+
+
+# A value is never written over what the form prints. A blank's answer region can reach
+# across the caption of the row below it, or be drawn around a caption rather than the
+# space after it, and a value set from the region's left edge then covered the form's own
+# words: a phone number across "Cell Phone", a name across "In case of emergency, please
+# contact:" -- 126 values on 47 of the benchmark's 107 forms (2026-09-18). A value that
+# would cover printing moves: along its line, past whatever is printed there, a word at a time; then
+# to a clear line inside its own region; then set smaller. Only if nothing anywhere is
+# clear is it drawn where it was measured, since a value slightly out of place still
+# beats one nobody can read.
+#
+# The gap kept after printing a value follows and the spacing between lines, both as
+# fractions of the size; and how many lines up the region is searched.
+PRINT_GAP = 0.3
+LINE_STEP = 1.15
+LINES_UP = 3
+# How many times a value may step right past the printing it lands on: a caption is
+# several words, and each step clears one word of it.
+MOVES = 5
+# What a value is set at, as fractions of the size it was measured at, when the space it
+# has is printed in. A region between two printed lines can be shallower than the value
+# the form was filled at, and half-size and in the clear reads better than full size
+# across a caption.
+SMALLER = (1.0, 0.8, 0.65, 0.5)
+# How near a printed word a value may come beside it, and how much of its height a value
+# has to reach across to be covering it rather than passing under it: lines of print
+# nearly touch, and a value on its rule grazes the caption above without hiding a
+# character of it.
+TOUCH_X = 0.12
+TOUCH_Y = 0.35
+
+
+def _covers(x: float, baseline: float, size: float, text: str, spans: Sequence) -> list:
+    """The printed words this value would be written across."""
+    x1 = x + pdf_backend.text_length(text, FONT, size)
+    # The whole box a reader will see the value in, which is the face's own ascent and
+    # descent, not the height of the characters this value happens to use.
+    top, bottom = baseline - pdf_backend.font_ascender(FONT) * size, baseline + _descent(FONT) * size
+    hit = []
+    for sx0, sy0, sx1, sy1 in spans:
+        across = min(x1, sx1) - max(x, sx0)
+        down = min(bottom, sy1) - max(top, sy0)
+        if across > -TOUCH_X * size and down > TOUCH_Y * max(sy1 - sy0, 1e-6):
+            hit.append((sx0, sy0, sx1, sy1))
+    return hit
+
+
+def _place(
+    text: str,
+    size: float,
+    x: float,
+    bottom: float,
+    region: tuple[float, float, float, float],
+    spans: Sequence,
+    width: float,
+) -> tuple[float, float, float]:
+    """Where to set ``text``: as measured, where that is clear of the form's printing."""
+    _, ry0, _, _ = region
+    best: tuple[int, float, float, float] | None = None
+    for step in range(LINES_UP if spans else 1):
+        baseline = bottom - step * LINE_STEP * size - _descent(FONT) * size
+        if step and baseline - pdf_backend.font_ascender(FONT) * size < ry0:
+            break
+        for shrink in SMALLER:
+            at = x
+            for _ in range(MOVES):
+                drawn = _fits(text, size * shrink, width - at)
+                over = _covers(at, baseline, drawn, text, spans)
+                if not over:
+                    return at, baseline, drawn
+                if best is None or len(over) < best[0]:
+                    best = (len(over), at, baseline, drawn)
+                past = max(span[2] for span in over) + PRINT_GAP * drawn
+                # Past the region's own right edge if that is what it takes. A region
+                # whose whole width is printed in ("In case of emergency, please
+                # contact:") is a region drawn around the caption rather than the space
+                # after it, and the answer goes after the printing, which is where the
+                # patient wrote it.
+                if past <= at or past >= width - EDGE_MARGIN:
+                    break
+                at = past
+    assert best is not None
+    return best[1], best[2], best[3]
+
+
+# The smallest a value is ever set at, in points on a letter page, and the margin kept
+# between the end of a value and the edge of the paper.
+MIN_DRAWN = 5.0
+EDGE_MARGIN = 4.0
+
+
+def _fits(text: str, size: float, room: float) -> float:
+    """The size that keeps a value on the page: a long one is set smaller, never cut.
+
+    A value set at the size the form was filled at can be longer than the paper -- an email
+    address a reader ran into the caption after it -- and the characters past the edge were
+    simply lost from the copy ("Reference Librarian" arriving as "Reference Librari").
+    """
+    span = pdf_backend.text_length(text, FONT, size)
+    room -= EDGE_MARGIN
+    if span <= room or room <= 0:
+        return size
+    return max(size * room / span, MIN_DRAWN)
 
 
 # A word box is about this much taller than the size its text was set at.
@@ -289,7 +504,7 @@ def _resolve(analysis, template, page_index: int) -> tuple[dict[str, Any], list,
     claimed: set[int] = set()
 
     if template is not None:
-        slots = template.pages[page_index].fields
+        slots = _page(template, page_index).fields
         pairs = sorted(
             (
                 (_overlap(slot.bbox, field.answer_bbox), i, j)
@@ -309,7 +524,7 @@ def _resolve(analysis, template, page_index: int) -> tuple[dict[str, Any], list,
             claimed.add(j)
 
     slot_ids = (
-        {CORPUS_KEY_ALIASES.get(f.field_id, f.field_id) for f in template.pages[page_index].fields}
+        {CORPUS_KEY_ALIASES.get(f.field_id, f.field_id) for f in _page(template, page_index).fields}
         if template is not None
         else set()
     )
@@ -335,7 +550,7 @@ def loose_values(analysis, template, page_index: int = 0) -> list[tuple[Bounding
     upload the value can simply go back where it was read: the page is the same page.
     """
     _, filled, placed = _resolve(analysis, template, page_index)
-    lifted = template.pages[page_index].lifted
+    lifted = _page(template, page_index).lifted
     loose = []
     for j, field in enumerate(filled):
         if j in placed or field.page_index != page_index:

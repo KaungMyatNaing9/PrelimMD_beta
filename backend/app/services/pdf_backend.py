@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
@@ -467,6 +468,17 @@ class TextBox:
     size: float
 
 
+@dataclass(frozen=True)
+class PageDraw:
+    """One page of a composed PDF: the image behind it and what is drawn on top."""
+
+    image: Path
+    width: float
+    height: float
+    texts: list[Text]
+    boxes: list[TextBox]
+
+
 def compose(
     image: Path,
     width: float,
@@ -476,32 +488,45 @@ def compose(
     fontname: str = "helv",
     color: tuple[float, float, float] = (0.05, 0.05, 0.15),
 ) -> bytes:
-    """A one-page PDF of ``image`` filling the page with text drawn over it.
+    """A one-page PDF of ``image`` filling the page with text drawn over it."""
+    return compose_pages([PageDraw(image, width, height, texts, boxes)], fontname, color)
+
+
+def compose_pages(
+    pages: Sequence[PageDraw],
+    fontname: str = "helv",
+    color: tuple[float, float, float] = (0.05, 0.05, 0.15),
+) -> bytes:
+    """A PDF of every page given, each its own image with text drawn over it.
 
     Coordinates are the page's top-left system, as everywhere else in the reader; a
     ``Text`` is placed by its baseline, a ``TextBox`` is filled from its top edge, its
     lines wrapped to its width, as PyMuPDF's ``insert_text`` and ``insert_textbox`` did.
+    Pages need not be the same size: a packet can mix letter and legal.
     """
     font = _font(fontname)
     buffer = BytesIO()
-    page = canvas.Canvas(buffer, pagesize=(width, height))
-    page.drawImage(ImageReader(str(image)), 0, 0, width=width, height=height)
-    page.setFillColorRGB(*color)
-    for item in texts:
-        page.setFont(font, item.size)
-        page.drawString(item.x, height - item.baseline, item.text)
+    first = pages[0] if pages else None
+    canvas_ = canvas.Canvas(buffer, pagesize=(first.width, first.height) if first else (612, 792))
     ascent, descent = BASE14.get(font, DEFAULT_METRICS)
-    for box in boxes:
-        page.setFont(font, box.size)
-        line_height = box.size * (ascent - descent)
-        baseline = box.y0 + ascent * box.size
-        for line in _wrapped(box.text, font, box.size, box.x1 - box.x0):
-            if baseline > box.y1 + 0.01:
-                break
-            page.drawString(box.x0, height - baseline, line)
-            baseline += line_height
-    page.showPage()
-    page.save()
+    for page in pages:
+        canvas_.setPageSize((page.width, page.height))
+        canvas_.drawImage(ImageReader(str(page.image)), 0, 0, width=page.width, height=page.height)
+        canvas_.setFillColorRGB(*color)
+        for item in page.texts:
+            canvas_.setFont(font, item.size)
+            canvas_.drawString(item.x, page.height - item.baseline, item.text)
+        for box in page.boxes:
+            canvas_.setFont(font, box.size)
+            line_height = box.size * (ascent - descent)
+            baseline = box.y0 + ascent * box.size
+            for line in _wrapped(box.text, font, box.size, box.x1 - box.x0):
+                if baseline > box.y1 + 0.01:
+                    break
+                canvas_.drawString(box.x0, page.height - baseline, line)
+                baseline += line_height
+        canvas_.showPage()
+    canvas_.save()
     return buffer.getvalue()
 
 
