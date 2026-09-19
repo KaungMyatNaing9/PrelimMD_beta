@@ -25,13 +25,17 @@ tool, and not HIPAA-compliant. **Never upload real patient data.**
   blank master and field coordinates from the upload itself.
 - **Regeneration.** Stored values are drawn back onto a blank template, positioned from the
   template's own coordinates rather than from the upload, so output fidelity does not
-  depend on capture quality.
+  depend on capture quality. Every page of a packet is refilled, a value is never written
+  over what the form prints or over another value, and a value too long for its space is set
+  smaller rather than cut. Measured across 111 real layouts, the copy makes no such mistake
+  (`scripts/evaluate_regeneration.py`).
 - **An optional local vision model** (`qwen2.5-VL` via Ollama), off by default. Nothing
   leaves the machine.
 
 Read [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) before relying on any of it.
-The short version: real scans are largely unread, values can bind to the wrong label, and
-handwriting is not supported.
+The short version: a value can bind to the wrong label, genuinely degraded scans are largely
+unread (and come back flagged rather than wrong), and handwriting reads at 43-53% where
+printed text reads at 92%.
 
 ## Run it
 
@@ -121,8 +125,10 @@ SMOKE_PORT=8011 make smoke
 
 ## Licensing
 
-The project ships under Apache 2.0. **One dependency currently conflicts with that**:
-PyMuPDF is AGPL-3.0. See [docs/LICENSING.md](docs/LICENSING.md) for the costed options.
+The project ships under Apache 2.0, and every dependency it ships is compatible with that
+(`THIRD_PARTY_LICENSES.md`). PyMuPDF, which is AGPL-3.0, was taken out of the product on
+2026-09-15 and survives only in the benchmark filler behind the optional `bench` extra. See
+[docs/LICENSING.md](docs/LICENSING.md) for the record.
 
 ## Data policy
 

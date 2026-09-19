@@ -4,9 +4,21 @@ The project ships under **Apache 2.0** (Gate 1 deliverable, `LICENSE` at the rep
 root). The faculty review asks that the dependency manifest stay current and that every
 component be confirmed compatible with that release.
 
-One component is not.
+**Every component now is. Resolved 2026-09-15 by option 1 below: the product migrated to a
+permissive PDF stack.** PyMuPDF is no longer imported anywhere under `backend/app/` --
+everything the product does with a PDF goes through `app/services/pdf_backend.py`, built on
+pdfplumber/pdfminer.six (MIT), pypdf (BSD), pypdfium2 (Apache/BSD) and reportlab (BSD). The
+migration was verified word for word against PyMuPDF on every benchmark page and on both
+accuracy tracks (`docs/PROGRESS.md`, 2026-09-15 night). PyMuPDF remains only in
+`scripts/fill_forms.py`, the benchmark filler, behind the optional `bench` extra; it never
+runs in the product and is not part of what is distributed as PrelimMD.
 
-## The conflict
+**Rule for contributors: do not add a PyMuPDF import to `backend/app/`. Extend
+`pdf_backend.py` instead.**
+
+The rest of this document is the record of the conflict and the evidence that decided it.
+
+## The conflict (as it stood before 2026-09-15)
 
 **PyMuPDF** (`pymupdf`, imported as `fitz`) is dual-licensed **AGPL-3.0 or Artifex
 Commercial**. AGPL-3.0 is a strong copyleft licence: distributing an Apache 2.0 project
@@ -62,12 +74,16 @@ already assert that a value sits inside its field and on the rule at its foot.
 The candidate packages were installed, measured, and uninstalled again so the manifest
 still reflects what the project actually ships.
 
-## The decision needed
+## The decision, and what was chosen
 
-1. **Migrate** to the permissive stack above, or
-2. **Obtain an Artifex commercial licence** for PyMuPDF, or
-3. **Relicense** PrelimMD, which contradicts the Gate 1 deliverable.
+1. **Migrate** to the permissive stack above -- **chosen, done 2026-09-15**.
+2. Obtain an Artifex commercial licence for PyMuPDF -- not pursued.
+3. Relicense PrelimMD, which contradicts the Gate 1 deliverable -- not pursued.
 
-This is a licensing decision, not an engineering one, and it should be settled before Gate
-3: the evidence package the faculty asks for includes a current manifest, and this is the
-one entry that fails it.
+The manifest (`THIRD_PARTY_LICENSES.md`) has no failing entry. Two further licence
+decisions were taken on the same evidence: Chandra OCR 2, the most accurate handwriting
+model surveyed, was rejected for being OpenRAIL-M with a field-of-use restriction rather
+than on accuracy; and the optional extras are recorded with their own terms (`postgres`:
+psycopg, LGPL-3.0, used over its public API; `heic`: pillow-heif, BSD-3-Clause, dynamically
+linking libheif, LGPL-3.0; `handwriting`: PaddlePaddle/PaddleOCR/PaddleX, all Apache-2.0,
+not installed by default).
