@@ -370,6 +370,12 @@ def _place(
         for shrink in SMALLER:
             at = x
             for _ in range(MOVES):
+                # Never onto ground the value cannot fit on: shrinking has a floor, and
+                # past it the end of a value runs off the paper and is lost from the copy
+                # ("Apt/Trailer" arriving as "Apt"). The place it was measured is kept
+                # instead, printing or not.
+                if at > x and width - EDGE_MARGIN - at < pdf_backend.text_length(text, FONT, MIN_DRAWN):
+                    break
                 drawn = _fits(text, size * shrink, width - at)
                 over = _covers(at, baseline, drawn, text, spans)
                 if not over:
