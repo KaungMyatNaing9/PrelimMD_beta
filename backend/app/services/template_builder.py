@@ -644,7 +644,7 @@ def _learn_page(
         canonical_width=width,
         canonical_height=height,
         fields=fields + choices,
-        printed_words=_printed_layer(pdf, index, page_words, width, height, inked),
+        printed_words=_printed_layer(pdf, index, page_words, width, height),
         printed_spans=_printed_spans(pdf, index, page_words, width, height, inked),
         lifted=[
             BoundingBox(x=x0 / width, y=y0 / height, width=(x1 - x0) / width, height=(y1 - y0) / height)
@@ -791,31 +791,27 @@ def _layer_without(
 
 
 def _printed_layer(
-    pdf: Path | None, index: int, page_words: list, width: int, height: int, inked: Sequence = ()
+    pdf: Path | None, index: int, page_words: list, width: int, height: int
 ) -> list[tuple[str, float, float]]:
     """What the form this template is learned from prints, word by word, in page fractions.
 
     A PDF's own text layer where there is one -- exact, where OCR of the render drops and
-    splits words -- and the render's OCR otherwise.
+    splits words -- and the render's OCR otherwise. Learned from the blank, this is the
+    form's furniture; learned from a filled copy it would also hold that patient's
+    answers, which is one more reason enrolment starts from the blank.
 
-    Learned from a blank this is the form's furniture. Learned from a filled copy it would
-    also hold that patient's answers, and a reader clears any value that is "the blank's
-    printing where the blank prints it" (`_blank_printing`) -- so the copy those answers
-    came from, read again, lost every one of them, and a later copy lost any value that
-    happened to match ("CA", "English", a shared city). ``inked`` is where the answers were
-    lifted to make the master, in page pixels; what was lifted was the patient's, not the
-    form's.
+    Dropping every word inside a lifted answer region was tried on 2026-09-19 and reverted.
+    It fixes a real fault -- the copy a template was learned from, read again, lost ten of
+    its eleven values, because each matched "the blank's printing where the blank prints
+    it" -- but a lifted region is a box, and the words inside it include the form's own
+    captions. Removing those stopped them suppressing the junk they were there to suppress:
+    on the no-blank track, recall 90.2 -> 91.5 but precision **94.0 -> 82.9**, some four
+    hundred more proposed values that are no answer at all. The narrower fix is to take out
+    only the words of the value that was lifted, as ``_layer_without`` already does for a
+    reviewer's correction; it is not attempted here because it is unmeasured.
     """
     words, w, h = _layer_words(pdf, index, page_words, width, height)
-    layer = _as_layer(words, w, h)
-    if not inked:
-        return layer
-    lifted = [(x0 / width, y0 / height, x1 / width, y1 / height) for x0, y0, x1, y1 in inked]
-    return [
-        (text, cx, cy)
-        for text, cx, cy in layer
-        if not any(lx0 <= cx <= lx1 and ly0 <= cy <= ly1 for lx0, ly0, lx1, ly1 in lifted)
-    ]
+    return _as_layer(words, w, h)
 
 
 def _layer_words(
