@@ -37,6 +37,21 @@ compatible with distributing this project under Apache 2.0, but it is an LGPL co
 and is recorded here for that reason rather than left implicit. Without the extra, HEIC
 uploads are refused with an actionable message and nothing else changes.
 
+## Optional extra: `bench`
+
+Not installed by default, not imported anywhere under `backend/app/`, and not part of what
+is distributed as PrelimMD. It exists for `scripts/fill_forms.py`, which writes synthetic
+patients into blank forms to build the fixed benchmark.
+
+| Dependency | Version range | Purpose | License |
+| --- | --- | --- | --- |
+| PyMuPDF | >=1.28,<2 | Draws benchmark fills into blank PDFs | AGPL-3.0 or Artifex Commercial |
+
+**AGPL-3.0 is incompatible with this project's Apache 2.0 release**, which is why the
+product was migrated off it on 2026-09-15 (`docs/LICENSING.md`). Everything the product
+does with a PDF now goes through `app/services/pdf_backend.py` on permissive libraries.
+This entry is recorded so the manifest is complete, not because it ships.
+
 ## Optional extra: `handwriting`
 
 Not installed by default, and nothing in the shipped path imports it.
@@ -48,7 +63,7 @@ Not installed by default, and nothing in the shipped path imports it.
 | PaddleX | >=3.7,<4 (`[ocr]`) | Pipeline plumbing PaddleOCR requires | Apache-2.0 |
 
 All three are Apache-2.0, so this extra raises no licensing conflict with the Apache 2.0
-deliverable — unlike PyMuPDF (see `docs/LICENSING.md`) and unlike Chandra OCR 2, the most
+deliverable — unlike PyMuPDF above and unlike Chandra OCR 2, the most
 accurate handwriting model surveyed, which is OpenRAIL-M with a field-of-use restriction
 and was rejected for that reason rather than on accuracy.
 
