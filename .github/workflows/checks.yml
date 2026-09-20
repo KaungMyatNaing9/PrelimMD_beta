@@ -8,8 +8,14 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: python -m pip install -e './backend[dev]'
-      - run: python scripts/create_synthetic_sample.py
-      - run: python scripts/verify_manifest.py
+      # The two steps that stood here built a synthetic sample and verified a manifest with
+      # scripts deleted on 2026-09-13, when the synthetic corpus was removed for reading
+      # 96.9% while real clinic forms read 45%. This job has failed on every push since,
+      # which is a notification nobody reads rather than a check anybody trusts.
+      #
+      # Tesseract is deliberately not installed: the one test that needs it skips itself,
+      # so the suite stays a few seconds rather than a few minutes, and what needs OCR is
+      # measured by the scripts in scripts/ against real forms, not here.
       - run: cd backend && pytest && ruff check app tests
   frontend:
     runs-on: ubuntu-latest
