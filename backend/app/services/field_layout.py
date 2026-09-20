@@ -393,6 +393,7 @@ def captions_for_row(
     sits against the second, so by distance alone the question was the first caption.
     """
     asked = {id(word) for word in question}
+    words = words_split_at_boxes(words, checkboxes)
     reach = max(b.height for b in row) * 4
     candidates = [
         word
@@ -560,6 +561,72 @@ def _glued(word: Word, box: Box, side: str = "") -> bool:
     right = box.x0 - 2 <= word.x0 < box.x1 and word.x1 >= box.x1 + reach
     left = box.x0 < word.x1 <= box.x1 + 2 and word.x0 <= box.x0 - reach
     return right if side == "right" else left if side == "left" else right or left
+
+
+# A word OCR read straight across a box and the captions on either side of it -- one token
+# for "Male [ ] Female" -- names no option, because a word names at most one box and there
+# is only this one for two. Cut at the box it contains, both captions are there.
+#
+# How much of the word must lie on each side of the box for the cut to be worth making, as
+# a fraction of the word's width: below this the box is at the word's edge, which is the
+# glued case ``_glued`` already handles.
+STRADDLE_SHARE = 0.15
+
+
+def _straddles(word: Word, box: Box) -> bool:
+    """Whether this word was read across the whole of this box, with text either side.
+
+    Doubt is required exactly as it is for a glued caption: a letter can pass for a box,
+    and splitting a confidently read word at one would cut a real value in half.
+    """
+    text = word.text.strip()
+    drawn = any(_symbol_glyph(ch) for ch in text)
+    if word.confidence >= GLUED_CONFIDENCE and not drawn:
+        return False
+    width = word.x1 - word.x0
+    if width <= 0 or not (word.x0 < box.x0 and box.x1 < word.x1):
+        return False
+    if min(box.y1, word.y1) - max(box.y0, word.y0) <= 0:
+        return False
+    return (
+        (box.x0 - word.x0) / width >= STRADDLE_SHARE
+        and (word.x1 - box.x1) / width >= STRADDLE_SHARE
+    )
+
+
+def _cut_at(word: Word, box: Box) -> list[Word]:
+    """The word either side of the box it was read across, or the word unchanged.
+
+    Where the cut falls in the text is worked out from where the box falls in the word:
+    OCR gives no per-character boxes, so the characters are assumed evenly spread, which
+    is close enough to land inside the run of box characters ("[_]", a symbol glyph) that
+    separates the two captions. Whatever of that run is left is trimmed as punctuation.
+    """
+    text = word.text
+    width = word.x1 - word.x0
+    if not text or width <= 0:
+        return [word]
+    start = max(0, min(len(text), round((box.x0 - word.x0) / width * len(text))))
+    end = max(start, min(len(text), round((box.x1 - word.x0) / width * len(text))))
+    pieces = []
+    for piece, x0, x1 in ((text[:start], word.x0, box.x0), (text[end:], box.x1, word.x1)):
+        piece = piece.strip(" \t[](){}_.:|-")
+        if _alphanumeric(piece):
+            pieces.append(word._replace(text=piece, x0=x0, x1=x1))
+    return pieces or [word]
+
+
+def words_split_at_boxes(words: list[Word], checkboxes: list[Box]) -> list[Word]:
+    """``words`` with any word read across a box replaced by the captions either side."""
+    if not checkboxes:
+        return words
+    out: list[Word] = []
+    for word in words:
+        inside = [b for b in checkboxes if _straddles(word, b)]
+        # One cut, at the first box: a word across two boxes is rare, and cutting
+        # repeatedly on a doubtful reading multiplies a guess.
+        out.extend(_cut_at(word, min(inside, key=lambda b: b.x0)) if inside else [word])
+    return out
 
 
 # How far past an option's first word its phrase may continue, in word heights of gap.
