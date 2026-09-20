@@ -60,11 +60,24 @@ validity) verify what a value *looks like*, and the broken thing is which label 
 to. For context, entity linking on the FUNSD benchmark tops out near 0.80 F1 with a trained
 model, so this is not a gap a further hand-built rule is likely to close.
 
-**Regeneration placement is accurate; slot selection is not.** A value bound to the right
-field lands sub-0.5mm from where it sat on the original. The headline placement figure is
-worse than that only because a value printed into the wrong slot counts as placement error.
-The denominator has also grown (19 → 21) as regeneration learned to place values it used to
-leave off the copy entirely, so the *share* within 2mm fell while the copy got better.
+**Placement misses are extraction faults, but not the ones this file used to claim.** It
+said the headline was dragged down by values printed into the wrong slot. Measured
+2026-09-20 with `evaluate_placement.py` now classifying each value by whether its text
+actually sits inside the answer region the reader chose: **all 21 do**. Nothing is in the
+wrong slot, and the split leaves 15/21 within 2mm exactly as before.
+
+What the six misses are, instead: three marginal (2.3–3.4mm on a date, an address and a
+city) and three large — `Male[ ]Female` at 8.2mm, `1420 Bellefield Avenue A` at 15.3mm,
+`Ngozi Okafor Sister 412-` at 34.2mm. Every one of the large ones is a *run-on*: the reader
+returned several fields, or a row of printed options, as a single value. Where the value is
+a whole row, its centre on the original is the centre of that row while the copy draws the
+string from the region's left edge, so the millimetres measure the run-on rather than the
+placement. The fix is in extraction, not in regeneration — but the criterion is not cleared
+by saying so, and the number stands at 15/21.
+
+The denominator grew (19 → 21) as regeneration learned to place values it used to leave off
+the copy entirely, so the *share* within 2mm fell while the copy got better. There is no
+systematic bias left: median offset is dx −0.15mm, dy −0.82mm.
 
 **Handwriting is recognised, not read well.** 43–53% of 49 fields, on five phone
 photographs, with a **10-point spread between identical runs** — the model is

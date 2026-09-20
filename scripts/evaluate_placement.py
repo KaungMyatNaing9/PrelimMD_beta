@@ -62,6 +62,34 @@ def _curl(*args: str) -> str:
     ).stdout
 
 
+# How far outside its own region a value's text may sit and still count as bound to it,
+# as a fraction of the region's size. OCR puts a line's centre a little off a tight box.
+BINDING_SLACK = 0.25
+
+
+def _bound(field, was: tuple[float, float]) -> bool:
+    """Whether the reader bound this value to the region the value actually occupies.
+
+    Two different faults land in the same millimetres otherwise. If the value's words sit
+    inside the answer region the reader chose, the copy drew it where the reader meant, and
+    the distance is placement error -- the thing this script exists to measure. If they sit
+    somewhere else entirely, the reader put the value in the wrong field, and regeneration
+    then faithfully drew it in that wrong field's place; the millimetres are a symptom of
+    the binding, and calling them placement error measures the wrong component.
+
+    Judged on where the text is, never on how far the copy ended up, so this cannot quietly
+    excuse a placement failure by relabelling it.
+    """
+    box = field.get("answer_bbox") or {}
+    if not box:
+        return True
+    slack_x, slack_y = box["width"] * BINDING_SLACK, box["height"] * BINDING_SLACK
+    return (
+        box["x"] - slack_x <= was[0] <= box["x"] + box["width"] + slack_x
+        and box["y"] - slack_y <= was[1] <= box["y"] + box["height"] + slack_y
+    )
+
+
 def analyse(api: str, path: Path) -> dict:
     mime = "application/pdf" if path.suffix.lower() == ".pdf" else "image/jpeg"
     out = _curl("-X", "POST", f"{api}/api/v1/form-analyses", "-F", f"file=@{path};type={mime}")
@@ -206,7 +234,7 @@ def main() -> int:
             # over the line could be a systematic offset -- every value shifted the same
             # way by the same indent or baseline maths -- or unrelated per-field error, and
             # the magnitude alone cannot tell those apart.
-            page.append((distance, field["label_text"], str(value), dx, dy))
+            page.append((distance, field["label_text"], str(value), dx, dy, _bound(field, was)))
 
         offsets += page
         if page:
@@ -214,9 +242,10 @@ def main() -> int:
             within = sum(1 for d, *_ in page if d <= TARGET_MM)
             print(f"\n{name}  {len(page)} values placed, {within} within {TARGET_MM}mm")
             print(f"   median {page[len(page)//2][0]:.2f}mm   worst {page[-1][0]:.2f}mm")
-            for d, label, value, dx, dy in page:
+            for d, label, value, dx, dy, bound in page:
                 if d > TARGET_MM:
-                    print(f"      {d:6.2f}mm  dx={dx:+6.2f} dy={dy:+6.2f}  {label[:22]:24} {value[:24]!r}")
+                    why = "" if bound else "  [wrong slot: the reader put it elsewhere]"
+                    print(f"      {d:6.2f}mm  dx={dx:+6.2f} dy={dy:+6.2f}  {label[:22]:24} {value[:24]!r}{why}")
         else:
             print(f"\n{name}  no values survived to the page")
 
@@ -237,6 +266,24 @@ def main() -> int:
     print(f"\nPLACEMENT {within}/{len(offsets)} within {TARGET_MM}mm = {within/len(offsets)*100:.1f}%")
     print(f"median {offsets[len(offsets)//2][0]:.2f}mm   worst {offsets[-1][0]:.2f}mm")
     print("Gate 3 criterion: regenerated field text within ~2mm of target position")
+
+    # The same values split by which fault they actually show. The headline above stays
+    # the headline: it is what a person sees on the copy, and a value in the wrong place is
+    # in the wrong place whatever caused it. But it mixes two faults with different fixes,
+    # and reporting only the mixture hides both.
+    bound = [o for o in offsets if o[5]]
+    misbound = [o for o in offsets if not o[5]]
+    if bound:
+        ok = sum(1 for d, *_ in bound if d <= TARGET_MM)
+        print(
+            f"\n  of those, bound to the right field: {ok}/{len(bound)} within {TARGET_MM}mm "
+            f"= {ok/len(bound)*100:.1f}%, median {bound[len(bound)//2][0]:.2f}mm"
+        )
+    if misbound:
+        print(
+            f"  read into the wrong field: {len(misbound)} "
+            f"(drawn where the reader put them, so these measure the binding, not placement)"
+        )
     return 0
 
 
