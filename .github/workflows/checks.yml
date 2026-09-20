@@ -1,5 +1,12 @@
 name: checks
-on: [push, pull_request]
+# Not on every push. This job failed on every push from 2026-09-13, when two scripts it
+# called were deleted, until 2026-09-20 -- a week of failure mail that told nobody
+# anything, and the mail is what people remember about a check. It now runs when somebody
+# asks for it and on pull requests, where a red mark is read rather than filtered.
+# Put `push:` back when the branch is shared with someone who will act on a red build.
+on:
+  pull_request:
+  workflow_dispatch:
 jobs:
   backend:
     runs-on: ubuntu-latest
