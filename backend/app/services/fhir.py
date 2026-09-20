@@ -9,16 +9,19 @@ This is a mapping layer, not a rewrite, because `canonical_registry` is already 
 vocabulary: every field carries a stable key, a display name and a value type. Those become
 `linkId`, `text` and the `value[x]` variant respectively.
 
-Deliberately absent: LOINC codes. The review asks for them on standardized items and the
-structure here carries them (`item.code`), but assigning a clinical code is a clinical
-decision. A wrong code is worse than no code -- it would be believed by the receiving
-system -- so codes are read from the registry and none are invented here.
+LOINC codes come from `loinc.py`, which carries them for the items where LOINC is the right
+code system and deliberately not for the rest: a name, a phone number or an insurance
+member ID belongs on a FHIR `Patient` or `Coverage` resource, in its own value set, and
+coding it would be inventing meaning rather than adding it. An uncoded item still travels
+with a stable `linkId` and its printed text, so nothing is lost. A wrong code is worse than
+no code, because the receiving system believes it.
 """
 
 from datetime import UTC, datetime
 from typing import Any
 
 from app.schemas.models import FieldType
+from app.services.loinc import code_for
 
 # https://hl7.org/fhir/R4/questionnaireresponse.html
 IN_PROGRESS = "in-progress"
@@ -74,9 +77,15 @@ def _item(field) -> dict[str, Any]:
         "text": field.label_text,
         "answer": [{_value_key(field): _value(field)}],
     }
+    # A code the reader itself carries wins over the table: a reviewer-taught or
+    # form-specific mapping knows more than a lookup on the canonical key can.
     code = getattr(field, "loinc_code", None)
     if code:
         item["code"] = [{"system": LOINC, "code": code}]
+    else:
+        standard = code_for(field.canonical_key)
+        if standard:
+            item["code"] = [{"system": LOINC, "code": standard[0], "display": standard[1]}]
     return item
 
 

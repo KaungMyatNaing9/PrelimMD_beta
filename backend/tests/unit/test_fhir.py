@@ -1,5 +1,6 @@
 """Emitting an analysis as a FHIR QuestionnaireResponse."""
 
+import re
 from types import SimpleNamespace
 
 from app.schemas.models import FieldType
@@ -69,10 +70,25 @@ def test_status_says_whether_a_human_has_finished_with_it():
 
 
 def test_no_loinc_code_is_invented():
-    """The registry carries codes when a clinician has assigned one; none are guessed here,
-    because a wrong code would be believed by whatever receives it."""
-    r = to_questionnaire_response(_analysis(_field()))
-    assert "code" not in r["item"][0]
+    """A code is emitted only where one was assigned, never guessed from the label.
+
+    A wrong code would be believed by whatever receives it, so the only source is the
+    table in `loinc.py`. A field LOINC does not code -- a name, a phone number -- carries
+    no `code` at all rather than an approximate one.
+    """
+    coded = to_questionnaire_response(_analysis(_field()))["item"][0]
+    assert coded["code"] == [
+        {"system": "http://loinc.org", "code": "21112-8", "display": "Birth date"}
+    ]
+    uncoded = to_questionnaire_response(
+        _analysis(_field(canonical_key="patient.full_name", label_text="Patient Name"))
+    )["item"][0]
+    assert "code" not in uncoded
+    unmapped = to_questionnaire_response(
+        _analysis(_field(canonical_key=None, label_text="Referring Physician"))
+    )["item"][0]
+    assert "code" not in unmapped
+    assert unmapped["linkId"] == "box_1", "an unmapped field is still identifiable"
 
 
 def test_a_model_overruling_geometry_is_recorded_as_a_disagreement():
@@ -108,3 +124,23 @@ def test_a_model_overruling_geometry_is_recorded_as_a_disagreement():
     agreed = field("04/17/1986")
     _adopt(agreed, "04 / 17 / 1986")
     assert agreed.agreement == "unread"
+
+
+def test_a_standard_item_carries_its_loinc_code():
+    """The items LOINC does code carry it; the ones it does not, do not.
+
+    A name or a phone number belongs on a FHIR Patient resource, not as a coded answer,
+    so an absent code here is the design rather than a gap.
+    """
+    from app.services.loinc import CODES, code_for
+
+    assert code_for("patient.date_of_birth") == ("21112-8", "Birth date")
+    assert code_for("medical.allergies")[0] == "48765-2"
+    # Identity and contact fields are deliberately uncoded.
+    for key in ("patient.full_name", "patient.phone", "insurance.member_id"):
+        assert code_for(key) is None
+    assert code_for(None) is None
+    # Every code is a LOINC part number: digits, a hyphen, and a check digit.
+    for code, display in CODES.values():
+        assert re.fullmatch(r"\d{4,5}-\d", code), code
+        assert display.strip()
