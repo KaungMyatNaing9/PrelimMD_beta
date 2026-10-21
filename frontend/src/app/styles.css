@@ -46,6 +46,9 @@ details.history small{opacity:.7}
 .dispute { color: #b4532a; font-weight: 600; }
 /* A caution, not a failure: the upload worked and the page is there, but the reader wants
    the reviewer to know why it found little. */
+/* The count inside a page button ("Page 2 (6 read)") inherited the grey of body text and
+   all but vanished against the button's blue. */
+button small { color: inherit; opacity: .85; }
 .warn { color: #8a5a00; background: #fff6e5; border-left: 4px solid #d17200; padding: 10px 12px; border-radius: 6px; }
 
 /* History tab. A timeline is a list of things that happened, so it reads as one: time

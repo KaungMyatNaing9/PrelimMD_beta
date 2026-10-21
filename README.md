@@ -8,6 +8,28 @@ blank copy of the same form from what it read.
 It is a research prototype: not a clinical system, not an EHR integration, not a diagnosis
 tool, and not HIPAA-compliant. **Never upload real patient data.**
 
+## Who it is for, and where it fits
+
+**The user** is the front-desk or intake staff at an outpatient clinic: the person who, today,
+retypes a patient's paper intake packet into the clinic's records by hand.
+
+**The workflow.** A patient fills in the clinic's own intake packet, on paper or as a PDF.
+Staff scan or photograph it. PrelimMD reads it and marks every answer it is unsure of. Staff
+check the page on screen beside what was read, correct anything wrong, and sign it off. The
+answers are stored, and a clean filled copy of the clinic's own form can be produced from them.
+A clinic uses a handful of intake forms thousands of times, so each form is learned once, from
+its blank, and every later copy is read through what was learned.
+
+**What the software does:** reads printed and typed answers; reads tick boxes by measuring the
+ink in each box; learns a form's layout from one blank copy; says how sure it is of each answer
+and flags the doubtful ones for a person; and refills the clinic's own blank form from the
+stored answers.
+
+**What it does not do:** diagnose, triage, or advise on anything clinical; read what a signature
+says (only whether one is there); read handwriting well (43-53% of fields on our handwritten
+set); verify who signed off a form; or send a page anywhere off the machine, unless an optional
+model is deliberately switched on. A person checks every form before it is used.
+
 ## What works today
 
 - **PDFs, JPGs and PNGs**, through one shared understanding pipeline. The file format
