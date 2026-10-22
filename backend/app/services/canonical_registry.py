@@ -244,6 +244,11 @@ REGISTRY = {
 }
 
 
+# Words that say what *kind* of value a field holds rather than which field it is. Shared
+# on their own, they are no evidence that two captions mean the same thing.
+TYPE_WORDS = {"date"}
+
+
 # Function words. A caption phrased as an instruction or a question is built from these;
 # a qualifier naming whose field it is ("Spouse", "Employer", "Guarantor") is not.
 PHRASING = {
@@ -311,6 +316,20 @@ def match(label: str):
     for field in REGISTRY.values():
         for alias in field.aliases:
             alias_tokens = set(norm(alias).split())
+            # Overlap is only evidence if some of it names the field. "Date of Injury" and
+            # "Date of Birth" share "date" and "of" -- a type and a function word -- and
+            # scored exactly the 0.5 bar, so every "Date of <event>" on every form became the
+            # patient's birth date: surgery, service, accident, onset. Regeneration then
+            # wrote the birth date into each of them, a value the original never had.
+            #
+            # Generic overlap is still the whole evidence for a field that is itself generic:
+            # the alias "Date" names nothing but a date, so "Date Needed" and "Effective Date"
+            # rightly match the form's own date. The rule only refuses a field whose alias
+            # carries a specific word the caption lacks -- "birth" -- measured on 2026-10-21:
+            # refusing every generic-only match lost four of those form dates.
+            generic = PHRASING | TYPE_WORDS
+            if not (tokens & alias_tokens) - generic and alias_tokens - generic:
+                continue
             score = len(tokens & alias_tokens) / max(1, len(tokens | alias_tokens))
             if score > best[0]:
                 best = (score, field)

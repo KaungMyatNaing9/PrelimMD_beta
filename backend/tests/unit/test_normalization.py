@@ -49,3 +49,20 @@ def test_the_empty_rule_is_not_part_of_the_value():
     assert normalize("____ 04/17/1986", FieldType.DATE) == "04/17/1986"
     assert normalize("noor_k@example.com", FieldType.SHORT_TEXT) == "noor_k@example.com"
     assert normalize("1420 Bellefield Ave.", FieldType.SHORT_TEXT) == "1420 Bellefield Ave."
+
+
+def test_a_date_of_some_other_event_is_not_the_birth_date():
+    """Sharing only "date" and "of" with "Date of Birth" is no evidence of being it.
+
+    Every "Date of <event>" used to score exactly the 0.5 bar against the birth date, and
+    regeneration then wrote the patient's birth date into the injury, surgery and service
+    dates of a copy -- values the original never had.
+    """
+    from app.services.canonical_registry import match
+
+    for caption in ("Date of Injury/Onset", "Date of Surgery", "Date of Service", "Date of Accident"):
+        field, _, _ = match(caption)
+        assert field is None or field.canonical_key != "patient.date_of_birth", caption
+    for caption in ("Date of Birth", "DOB", "Birth Date", "Patient Date of Birth"):
+        field, _, _ = match(caption)
+        assert field is not None and field.canonical_key == "patient.date_of_birth", caption
