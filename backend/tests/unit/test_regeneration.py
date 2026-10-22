@@ -1,7 +1,8 @@
 """Filling stored values back onto a blank template."""
 
-import fitz
 import pytest
+
+fitz = pytest.importorskip("fitz")  # PyMuPDF is only in the optional bench extra
 
 from app.services.regeneration import regenerate, values_from_analysis
 from app.services.templates import canonical_image_path, registry

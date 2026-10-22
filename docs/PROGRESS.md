@@ -3515,3 +3515,45 @@ What the episode did leave behind: a form naming a template the registry no long
 derives one instead of refusing, which is worth more than it sounds -- 40 of the 50 forms
 stored in a working backend answered "Unknown template" to a request for a copy of
 themselves.
+
+## 2026-10-21 — A date of any event was the birth date; demo rehearsal
+
+**Found by rehearsing the demo.** On the demo form, the regenerated copy wrote the patient's
+birth date into "Date of Injury/Onset", a field the original left blank. The caption matcher
+scores word overlap, and "Date of Injury" shares exactly two words with "Date of Birth":
+"date" and "of". That reached the 0.5 bar, so every "Date of <event>" -- surgery, service,
+accident, onset -- became `patient.date_of_birth`, and regeneration wrote the birth date into
+each. No accuracy figure caught it: the field was blank in the truth, so there was nothing to
+score. Nor did the regeneration audit, which checks the copy against the plan, and the plan was
+wrong.
+
+**The fix** (`canonical_registry.match`): a match whose shared words are only function words
+and type words ("date") is refused when the target alias carries a specific word the caption
+lacks ("birth"). The first version refused every such match and lost four fields whose truth is
+the form's own date -- "Date Needed", "Date Reviewed", "Effective Date" -- which legitimately
+match the alias "Date", whose only word is the type. Narrowed accordingly.
+
+**Measured** against a control run the same day on the code without the fix (a month had passed
+since the last numbers, so the old figures were not assumed):
+
+| | control | first version | narrowed (kept) |
+|---|---|---|---|
+| zero-shot recall | 1869 / 2775 | 1865 | **1869** |
+| zero-shot precision | 78.1% | 77.9% | **78.1%** |
+| ticks read | 359 / 417 | 358 | **359** (fields 2221 -> 2223) |
+| corrected track | 91.8 / 94.0 | 91.8 / 94.0 | **91.8 / 94.0** |
+
+Also removed: on one packet the old code reported a confident wrong birth date, the form's own
+date read as DOB. Still open, same family: "Date of next visit with referring physician" maps to
+`care.primary_physician`.
+
+**Other faults the rehearsal found, all fixed:** the demo server was running code from before
+the last commit of 20 September; a failed request showed the server's JSON body verbatim; the
+read count in each page button was invisible; FHIR called a page where nothing was read
+"completed"; and `test_regeneration.py` imported PyMuPDF at the top, so the suite failed to
+collect on an install without the optional bench extra.
+
+**Demo state.** Benchmark servers had been writing into the demo server's artifact folder --
+2,013 runs today alone -- so the stored-forms list showed nothing but benchmark runs. The demo
+server now runs on its own empty folders (`demo-state/`, outside the repository), and
+`docs/DEMO.md` says so.

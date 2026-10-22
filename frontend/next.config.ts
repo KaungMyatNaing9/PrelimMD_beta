@@ -1,3 +1,4 @@
 import type { NextConfig } from "next";
-const nextConfig: NextConfig = {};
+// Hide the development-mode badge: the app is shown to people in dev mode.
+const nextConfig: NextConfig = { devIndicators: false };
 export default nextConfig;

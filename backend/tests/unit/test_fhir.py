@@ -144,3 +144,8 @@ def test_a_standard_item_carries_its_loinc_code():
     for code, display in CODES.values():
         assert re.fullmatch(r"\d{4,5}-\d", code), code
         assert display.strip()
+
+
+def test_a_page_with_nothing_read_is_not_completed():
+    """Nothing answered means nothing flagged, and that is not a finished form."""
+    assert to_questionnaire_response(_analysis())["status"] == "in-progress"

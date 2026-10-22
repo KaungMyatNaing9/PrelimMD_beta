@@ -119,9 +119,16 @@ invented coordinates.
 ## Not implemented
 
 - **FHIR beyond one resource.** `GET /api/v1/form-analyses/{id}/fhir` emits an R4
-  `QuestionnaireResponse`; there is no LOINC coding of individual questions, and no other
-  resource type.
+  `QuestionnaireResponse`, with LOINC codes on the four concepts where LOINC is the right code
+  system (birth date 21112-8, sex 46098-0, medications 10160-0, allergies 48765-2, written from
+  knowledge of US Core and C-CDA and to be checked against a LOINC release). Identity and contact
+  fields are not coded, by design: they belong on a FHIR `Patient` resource. No other resource
+  type is emitted.
 - **Authentication.** Sign-off records who *claimed* to check a form. Nothing verifies it.
+- **Storage is split.** PostgreSQL holds the append-only audit trail: every read and every
+  correction, with the value it replaced. The working record of each form (`analysis.json` in
+  its run folder) and the learned templates (`data/templates/`) are JSON files beside it. The
+  work plan put both in PostgreSQL; moving them in is a contained next step.
 - **Template learning for every layout.** A template is derived from the geometric view, so
   it works where a form draws answer regions the detector can find.
 - **Downsampled output.** A regenerated PDF embeds the full-resolution blank master, so a

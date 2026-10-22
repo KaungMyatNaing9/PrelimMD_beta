@@ -50,7 +50,9 @@ def to_questionnaire_response(
     answered = [f for f in analysis.detected_fields if _has_value(f)]
     response: dict[str, Any] = {
         "resourceType": "QuestionnaireResponse",
-        "status": COMPLETED if not any(f.needs_review for f in answered) else IN_PROGRESS,
+        # A page where nothing was read has nothing flagged either, and was reported
+        # "completed": the machine had finished nothing.
+        "status": COMPLETED if answered and not any(f.needs_review for f in answered) else IN_PROGRESS,
         "authored": datetime.now(UTC).isoformat(),
         "item": [_item(f) for f in answered],
     }
